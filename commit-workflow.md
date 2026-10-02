@@ -23,6 +23,8 @@
   commit, and say so).
 - Tiny commits (under ~10 lines, or comments/docs only): ask the user to review manually; if they decline, run one
   review on Haiku, whatever the committer model.
+- Review is mandatory for every commit. A request to commit or push does not skip it, including the user review of
+  tiny commits.
 - When the review is clean, push to the current branch, confirm CI passes, then continue. Without CI, run the
   project's local test and lint commands instead. With slow CI, start the next commit while it runs; a failure then
   gets a new commit. Re-run a suspected flaky failure once before treating it as real.
