@@ -27,7 +27,8 @@
 - Severity bar (state it in the reviewer prompt): only bugs, behaviour changes, platform/version incompatibilities and
   real maintenance traps block. Comment/wording nits are fixed in one batch without another review round.
 - Security-sensitive changes (auth, crypto, input parsing, permissions) also get a security-review pass before pushing.
-- Rounds 2+ review only the amended delta against the previous round's commit, still with a fresh-context reviewer.
+- Rounds 2+ review only the amended delta against the previous round's commit (`git diff -U30 <prev> HEAD`, so
+  nearby code shows), still with a fresh-context reviewer.
   If a finding reverses an earlier round's request, ask the user instead of applying it.
 - Stop after 3 rounds and report what is left, unless a round finds something major (bug or behaviour change): then
   keep going, up to 5 rounds, then stop and ask the user.
