@@ -5,8 +5,9 @@ Rules for an AI coding agent (Claude Code) to commit and review code in small, r
 
 ## Summary
 
-- **Small commits:** 400 lines of diff at most, not counting generated, lock or vendored files. Each commit builds
-  and passes tests on its own. Large work starts with a published commit plan.
+- **Small commits:** 400 lines of code diff at most, not counting generated, lock or vendored files; docs and static
+  data are exempt. Each commit builds and passes tests on its own. Large work starts with a published commit plan,
+  ordered so commits on the same model sit together.
 - **Review every commit:** a fresh-context subagent reviews each commit, and fixes are amended in until the review
   is clean. Only bugs, behaviour changes, incompatibilities and maintenance traps block.
 - **Bounded rounds:** later rounds review only what changed since the last round. Review stops after 3 rounds, or 5

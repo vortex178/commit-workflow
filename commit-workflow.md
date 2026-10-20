@@ -1,8 +1,11 @@
 # Commit and review workflow
 
 ## Commit size
-- A single commit must never exceed 400 lines of diff (insertions + deletions). Measure with `git diff --stat -M` so
-  moves and renames count once, and leave generated, lock, binary and vendored files out of the count.
+- A single code commit must never exceed 400 lines of diff (insertions + deletions). Measure with
+  `git diff --stat -M` so moves and renames count once, and leave generated, lock, binary and vendored files out of
+  the count.
+- The 400-line cap applies to code. Documentation and static data (e.g. fixtures, datasets) may exceed it in a single
+  commit (review is still mandatory). Config files and seed scripts count as code.
 - Split larger work into logical commits that each build and pass tests on their own. Split by feature slice and keep
   tests in the same commit as the code they cover.
 - A mechanical commit that cannot be split (formatter run, dependency bump, rename sweep) may exceed the cap if its
@@ -21,8 +24,8 @@
   commit message and a short statement of intent and known constraints. Amend fixes into the same commit (no fixup
   commits); amend only unpushed commits and never rewrite pushed history (a problem found after a push gets a new
   commit, and say so).
-- Tiny commits (under ~10 lines, or comments/docs only): ask the user to review manually; if they decline, run one
-  review on Haiku, whatever the committer model.
+- Tiny commits (under ~10 lines, or comment/docs edits under ~50 lines): ask the user to review manually; if they
+  decline, run one review on Haiku, whatever the committer model.
 - Review is mandatory for every commit. A request to commit or push does not skip it, including the user review of
   tiny commits.
 - When the review is clean, push to the current branch, confirm CI passes, then continue. Without CI, run the
@@ -55,6 +58,10 @@
 - Keep context lean: fetch only the needed part of a page (a targeted query or one section), and never print the whole
   environment or other large outputs.
 - After each commit, suggest model + effort (committer and reviewer) for the next one.
+- When proposing a commit plan, order the commits so that those needing the same committer model (and, as far as
+  possible, the same reviewer model and effort) sit next to each other, because the user switches models by hand.
+  Build the dependency graph first so each commit still builds and passes tests on its own, and say in the plan where
+  the user has to switch models.
 
 ## Languages and file types (untested, revisit)
 - Verbose languages (Java, generated Go, SwiftUI, XML layouts, Terraform): the user may set a per-repo cap instead of 400.
