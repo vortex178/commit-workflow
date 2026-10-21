@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "SubagentStop": [
+      {
+        "matcher": "^commit-workflow:commit-reviewer$",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/on_reviewer_stop.py\"" }
+        ]
+      }
+    ]
+  }
+}
