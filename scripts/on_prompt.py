@@ -3,8 +3,9 @@
 
 "Approved <sha> ..." (only SHAs after the word) marks the named commits: unmarked, on HEAD and on no remote. A bare
 "Approved" marks the one such commit only when there is exactly one and the agent's last message asked for it with
-the line "Reply 'Approved' to mark <sha> as manually reviewed", so a reply to something else does not approve it;
-otherwise the hook lists the pending commits and asks for SHAs. The user and the agent are both told what was
+the line "Reply 'Approved' to mark <sha> as manually reviewed" and the user has not written since (local `!cmd`,
+slash-command and task-notice entries don't count), so a reply to something else does not approve it; otherwise
+the hook lists the pending commits and asks for SHAs. The user and the agent are both told what was
 marked. The hook cannot tell who typed a prompt, so it relies on the agent being unable to send one.
 """
 import json
@@ -20,7 +21,7 @@ BARE_RE = re.compile(r"^[\s.!]*$")
 NAMED_RE = re.compile(r"^[\s,:]*(?:[0-9a-f]{7,64}(?=[\s,.!]|$)[\s,.!]*)+$", re.I)
 TOKEN_RE = re.compile(r"[0-9a-f]{7,64}", re.I)
 LOCAL_RE = re.compile(r"\s*<(?:bash-input|bash-stdout|bash-stderr|command-name|command-message|command-args|"
-                      r"local-command-stdout|local-command-stderr)>")
+                      r"local-command-stdout|local-command-stderr|task-notification)>")
 REQUEST_RE = re.compile(r"\breply\W+approved\W+to mark\W+([0-9a-f]{7,64})\W+as manually reviewed", re.I)
 
 
@@ -51,8 +52,9 @@ def entry_text(content):
 
 def last_assistant_text(transcript_path, prompt):
     """Text of the agent's last message in the session transcript, or "" if the user wrote to it since. The prompt
-    itself may already be logged last; local command entries (`!cmd`, slash commands) are not the user writing."""
-    entries = []
+    itself may already be logged last; local command entries (`!cmd`, slash commands, task notices) are not the user
+    writing."""
+    entries = []  # (role, text), with "" for an agent entry without text such as a tool call
     try:
         with open(os.path.expanduser(transcript_path), encoding="utf-8", errors="replace") as f:
             for line in f:
@@ -60,18 +62,24 @@ def last_assistant_text(transcript_path, prompt):
                     entry = json.loads(line)
                 except ValueError:
                     continue
-                skip = not isinstance(entry, dict) or entry.get("isMeta") or entry.get("isSidechain")
-                message = None if skip else entry.get("message")
+                if not isinstance(entry, dict) or entry.get("isMeta") or entry.get("isSidechain"):
+                    continue
+                message = entry.get("message")
                 said = entry_text(message.get("content")) if isinstance(message, dict) else ""
-                if said.strip() and entry.get("type") in ("assistant", "user") \
-                        and not (entry.get("type") == "user" and LOCAL_RE.match(said)):
-                    entries.append((entry.get("type"), said))
+                if entry.get("type") == "assistant" and isinstance(message, dict):
+                    entries.append(("assistant", said))
+                elif said.strip() and entry.get("type") == "user" and not LOCAL_RE.match(said):
+                    entries.append(("user", said))
     except (OSError, TypeError):
         pass
-    users = [number for number, (role, _) in enumerate(entries) if role == "user"]
-    if users and prompt.strip() in entries[users[-1]][1]:  # logged with any attachments
-        del entries[users[-1]]
-    return entries[-1][1] if entries and entries[-1][0] == "assistant" else ""
+    if entries and entries[-1][0] == "user" and prompt.strip() in entries[-1][1]:  # logged with any attachments
+        entries.pop()
+    for role, said in reversed(entries):
+        if role == "user":
+            return ""
+        if said.strip():
+            return said
+    return ""
 
 
 def choose(rest, pending, shown):

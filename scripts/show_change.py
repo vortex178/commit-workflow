@@ -25,12 +25,8 @@ BINARY = "the change has binary content, which cannot be shown; ask the user to 
 
 def normalize(text):
     """Lines without colour codes and trailing whitespace: what survives the trip through the tool result."""
-    lines = []
-    for line in text.split("\n"):
-        while ANSI_RE.search(line):  # until none is left, so normalizing twice changes nothing
-            line = ANSI_RE.sub("", line)
-        lines.append(line.rstrip())
-    return lines
+    # Stray escape characters go too, so normalizing twice changes nothing.
+    return [ANSI_RE.sub("", line).replace("\x1b", "").rstrip() for line in text.split("\n")]
 
 
 def width(line):

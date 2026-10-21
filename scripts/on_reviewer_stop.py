@@ -65,8 +65,7 @@ def bash_outputs(transcript_path):
 def saw(sha, outputs, cwd, rounds=0, memo=None):
     """Every part of sha's change, or of a change from a commit that was itself seen, is among outputs."""
     memo = {} if memo is None else memo
-    if (sha, rounds) not in memo:
-        memo[sha, rounds] = False  # a cycle of --from reads proves nothing
+    if (sha, rounds) not in memo:  # MAX_ROUNDS ends a cycle of --from reads
         memo[sha, rounds] = _saw(sha, outputs, cwd, rounds, memo)
     return memo[sha, rounds]
 
@@ -128,9 +127,9 @@ def main():
     if sha is None or not review_notes.is_ancestor(sha, head, cwd):
         return problem(event, "The verdict names %s, which is not a commit on the current branch (HEAD is %s). "
                               "Name the commit you reviewed." % (prefix, head), "the verdict names %s." % prefix)
-    if show_change.parts(sha, "", 3, cwd) == show_change.BINARY:
-        return report("Review mark not written for %s: %s" % (sha[:12], show_change.BINARY))
     if not saw(sha, bash_outputs(event.get("agent_transcript_path") or ""), cwd):
+        if show_change.parts(sha, "", 3, cwd) == show_change.BINARY:
+            return report("Review mark not written for %s: %s" % (sha[:12], show_change.BINARY))
         script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "show_change.py")
         return problem(event, "Before a clean verdict, run `python3 \"%s\" %s` and each further part it names, each "
                               "in its own command, without filtering its output (in a later round, the same script "

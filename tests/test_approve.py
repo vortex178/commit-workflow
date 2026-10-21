@@ -13,8 +13,9 @@ class ApprovedPromptTest(RepoCase):
         entries = [("assistant", [{"type": "text", "text": shown}]), ("assistant", [{"type": "tool_use", "id": "t"}]),
                    *after, *([("user", text)] if logged else [])]
         with open(transcript, "w") as f:
-            for role, content in entries:
-                f.write(json.dumps({"type": role, "message": {"content": content}}) + "\n")
+            for entry in entries:  # a str is a raw line
+                f.write((entry if isinstance(entry, str) else
+                         json.dumps({"type": entry[0], "message": {"content": entry[1]}})) + "\n")
         event = dict({"hook_event_name": "UserPromptSubmit", "cwd": self.repo, "prompt": text,
                       "transcript_path": transcript}, **extra)
         result = run_hook("on_prompt.py", event, env=env)
@@ -36,10 +37,15 @@ class ApprovedPromptTest(RepoCase):
             self.assertIn("did not ask", self.prompt("Approved", shown=shown, after=after))
         self.assertIsNone(self.mark(tiny))
         self.assertIn("did not ask", self.prompt("Approved", shown=ask, after=[("user", "Approved"), ("user", "Hm")]))
-        self.assertIn("marked as manually", self.prompt("Approved", shown=ask, logged=False))
+        tool_only = ("assistant", [{"type": "tool_use"}])
+        for after in ([("user", "Approved"), tool_only], [("user", "Approved? Not yet."), tool_only]):
+            self.assertIn("did not ask", self.prompt("Approved", shown=ask, after=after, logged=False))
+        blank = ["[1]", "null", ("assistant", [{"type": "text", "text": " "}])]
+        self.assertIn("marked as manually", self.prompt("Approved", shown=ask, after=blank, logged=False))
         self.git("notes", "--ref", review_notes.NOTES_REF, "remove", tiny)
         local = [("user", "<bash-input>git show %s</bash-input>" % tiny), ("user", "<bash-stdout>diff</bash-stdout>"),
                  ("user", "<command-name>/cost</command-name>"),
+                 ("user", "<task-notification>done</task-notification>"),
                  ("user", [{"type": "text", "text": "<ide_selection>x</ide_selection>"},
                            {"type": "text", "text": "Approved."}])]
         message = self.prompt("Approved.", shown=ask, after=local, logged=False)

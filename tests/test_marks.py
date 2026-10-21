@@ -162,7 +162,7 @@ class ReviewerStopTest(RepoCase):
         self.assertIn("approve it manually", result.stdout)
 
     def test_long_lines_and_odd_escapes_are_matched(self):
-        sha = self.commit("min.js", "x" * 9999 + " " + "y" * 100 + "\nz \x1b\x1b[0m[31mq\n\U0001F600" * 3 + "\n")
+        sha = self.commit("min.js", "x" * 9998 + " " + "y" * 100 + "\nz \x1b\x1b[0m[31mq\n\U0001F600" * 3 + "\n")
         self.stop("VERDICT: clean " + sha, self.transcript(show(sha)))
         self.assertTrue(review_notes.is_clean(self.mark()))
         self.assertIn("from 0 to 9999", run(show(sha, "--context", "10000"), self.repo, shell=True))
