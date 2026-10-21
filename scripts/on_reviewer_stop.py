@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """SubagentStop hook: turn a commit-reviewer's clean verdict into a review mark on the reviewed commit.
 
-The mark is written only when the verdict names a commit on the current branch and the reviewer's own transcript
-shows a successful Bash `git show <sha>` or `git diff <rev> <sha>` that printed a patch. The command must name the
-commit itself, not HEAD, so a read from an earlier round cannot stand in for the amended commit. Problems the
-reviewer can fix make it continue once with instructions. The committer never writes marks itself.
+The mark is written only when the verdict names a commit on the current branch and the reviewer saw that commit's
+change: every part that show_change.py prints for it must appear unaltered in the output of one of the reviewer's
+successful Bash commands. The hook recomputes the parts itself, so a filtered, truncated or stale read cannot stand in
+for them. A later round may instead read the change from <prev> (`show_change.py <sha> --from <prev>`), when <prev>
+has the same parent and was itself seen that way. Problems the reviewer can fix make it continue once with
+instructions.
 """
 import json
 import os
@@ -13,14 +15,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import review_notes  # noqa: E402
+import show_change  # noqa: E402
 
 REVIEWER = "commit-workflow:commit-reviewer"
 VERDICT_RE = re.compile(r"^[ \t>*`]*VERDICT:[ \t]*([a-z-]+)(?:[ \t]+([0-9a-f]{7,64}))?[ \t*`.]*$", re.M | re.I)
-SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
-GIT_READ_RE = re.compile(r"^\s*(?:\w+=\S*\s+)*git(?:\s+-[Cc]\s+\S+|\s+--[\w-]+(?:=\S+)?)*\s+(show|diff)(?:\s+(.*))?$")
-NO_PATCH = {"-s", "--no-patch", "-q", "--quiet", "--check", "--stat", "--shortstat", "--numstat", "--name-only",
-            "--name-status", "--raw", "--summary", "--dirstat", "--compact-summary"}
-REDIRECT_RE = re.compile(r"\d*(?:>&\d+|[<>]{1,2}\s*\S+)")
+HEADER_RE = re.compile(r"^== commit-review (?:([0-9a-f]{40,64})\.\.)?([0-9a-f]{40,64}) -U([0-9]{1,4}) part 1/", re.M)
+MAX_ROUNDS = 5
+MAX_READS = 50
 
 
 def parse_verdict(text):
@@ -37,8 +38,8 @@ def _text(content):
     return ""
 
 
-def bash_reads(transcript_path):
-    """(command, output) for each Bash call in the agent's JSONL transcript that completed without error."""
+def bash_outputs(transcript_path):
+    """The output of each Bash call in the agent's JSONL transcript that completed without error, normalized."""
     calls, results = [], {}
     try:
         with open(os.path.expanduser(transcript_path), encoding="utf-8", errors="replace") as f:
@@ -53,44 +54,35 @@ def bash_reads(transcript_path):
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "tool_use" and block.get("name") == "Bash":
-                        tool_input = block.get("input")
-                        command = tool_input.get("command") if isinstance(tool_input, dict) else None
-                        if isinstance(command, str):
-                            calls.append((block.get("id"), command))
+                        calls.append(block.get("id"))
                     elif block.get("type") == "tool_result" and not block.get("is_error"):
                         results[block.get("tool_use_id")] = _text(block.get("content"))
     except (OSError, TypeError):
         pass
-    return [(command, results[call_id]) for call_id, command in calls if call_id in results]
+    return ["\n" + "\n".join(show_change.normalize(results[call])) + "\n" for call in calls if call in results]
 
 
-def names_commit(token, sha):
-    return bool(review_notes.HEX_RE.match(token)) and sha.startswith(token)
+def saw(sha, outputs, cwd, rounds=0, memo=None):
+    """Every part of sha's change, or of a change from a commit that was itself seen, is among outputs."""
+    memo = {} if memo is None else memo
+    if (sha, rounds) not in memo:
+        memo[sha, rounds] = False  # a cycle of --from reads proves nothing
+        memo[sha, rounds] = _saw(sha, outputs, cwd, rounds, memo)
+    return memo[sha, rounds]
 
 
-def read_the_patch(reads, sha):
-    for command, output in reads:
-        if "diff --git" not in output and "diff --cc" not in output:
+def _saw(sha, outputs, cwd, rounds, memo):
+    reads = {(prev or "", int(context)) for output in outputs for prev, name, context in HEADER_RE.findall(output)
+             if name == sha}
+    for prev, context in sorted(reads)[:MAX_READS]:
+        if prev and (rounds >= MAX_ROUNDS or prev == sha):
             continue
-        for segment in SEGMENT_SPLIT_RE.split(command):
-            match = GIT_READ_RE.match(segment)
-            if not match:
-                continue
-            args = REDIRECT_RE.sub(" ", match.group(2) or "").split()
-            if "--" in args:  # limited to some paths
-                continue
-            if NO_PATCH.intersection(arg.split("=")[0] for arg in args) and not {"-p", "--patch"}.intersection(args):
-                continue
-            revisions = [arg for arg in args if not arg.startswith("-")]
-            if match.group(1) == "show" and all(review_notes.HEX_RE.match(rev) for rev in revisions) \
-                    and any(names_commit(rev, sha) for rev in revisions):
-                return True
-            if match.group(1) == "diff":
-                if len(revisions) == 2 and names_commit(revisions[1], sha):
-                    return True
-                if len(revisions) == 1 and "..." not in revisions[0] and ".." in revisions[0] \
-                        and names_commit(revisions[0].split("..")[1], sha):
-                    return True
+        parts = show_change.parts(sha, prev, context, cwd)
+        expected = ["\n" + "\n".join(show_change.normalize(part)) + "\n" for part in parts] \
+            if isinstance(parts, list) else []
+        if expected and all(any(part in output for output in outputs) for part in expected) \
+                and (not prev or saw(prev, outputs, cwd, rounds + 1, memo)):
+            return True
     return False
 
 
@@ -136,10 +128,14 @@ def main():
     if sha is None or not review_notes.is_ancestor(sha, head, cwd):
         return problem(event, "The verdict names %s, which is not a commit on the current branch (HEAD is %s). "
                               "Name the commit you reviewed." % (prefix, head), "the verdict names %s." % prefix)
-    if not read_the_patch(bash_reads(event.get("agent_transcript_path") or ""), sha):
-        return problem(event, "Before a clean verdict, run `git show %s` (or `git diff <prev> %s` for a later round) "
-                              "so the patch is in your transcript, then repeat the verdict." % (sha, sha),
-                       "the reviewer's transcript shows no git show/diff of %s." % sha[:12])
+    if show_change.parts(sha, "", 3, cwd) == show_change.BINARY:
+        return report("Review mark not written for %s: %s" % (sha[:12], show_change.BINARY))
+    if not saw(sha, bash_outputs(event.get("agent_transcript_path") or ""), cwd):
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "show_change.py")
+        return problem(event, "Before a clean verdict, run `python3 \"%s\" %s` and each further part it names, each "
+                              "in its own command, without filtering its output (in a later round, the same script "
+                              "with `%s --from <prev>`, once you have read <prev> that way), then repeat the verdict."
+                       % (script, sha, sha), "the reviewer's transcript shows no complete read of %s." % sha[:12])
     try:
         review_notes.write_mark(sha, cwd, {"verdict": "clean", "kind": "agent",
                                            "reviewer": REVIEWER, "agent_id": event.get("agent_id")})

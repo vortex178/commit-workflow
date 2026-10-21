@@ -7,14 +7,13 @@ since those change what a commit's parent is.
 """
 import json
 import os
-import re
 import subprocess
 from datetime import datetime, timezone
 
 NOTES_REF = "refs/notes/review"
-HEX_RE = re.compile(r"^[0-9a-f]{7,64}$")
 ENV = dict({key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
            GIT_NO_REPLACE_OBJECTS="1")
+DIFF = ["diff-tree", "-r", "--no-textconv", "--no-ext-diff", "--ignore-submodules=none", "--no-color"]
 
 
 def git(args, cwd, stdin=None, text=True):
@@ -35,6 +34,14 @@ def resolve(rev, cwd):
     if result.returncode != 0:
         return None
     return result.stdout.strip() or None
+
+
+def parents(sha, cwd):
+    """The parents of commit sha, first parent first. RuntimeError if git fails."""
+    result = git(["rev-list", "--parents", "-n", "1", sha], cwd)
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(result.stderr.strip() or "git rev-list failed")
+    return result.stdout.split()[1:]
 
 
 def is_ancestor(sha, head, cwd):

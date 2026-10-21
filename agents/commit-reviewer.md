@@ -9,11 +9,13 @@ Use Bash only for read-only commands such as `git show`, `git diff`, `git log`, 
 
 ## Start
 
-1. Run `git rev-parse HEAD` and `git show --stat <sha>`, then `git show <sha>` for the commit you were given. For a
-   later round, run the delta command you were given (e.g. `git diff -U30 <prev> <sha>`); for a merge commit, run
-   `git diff <sha>^1 <sha>`. Name the commit by its SHA, not HEAD, and don't limit the command to some paths or
-   truncate its output (no `| head`): the review mark is only recorded if your transcript shows you read that
-   commit's full patch this way.
+1. Run `git show --stat <sha>`, then `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/show_change.py" <sha>` for the commit
+   you were given (for a merge, it shows the change against the first parent). If it says there are more parts, run
+   each one in its own command as it tells you. For a later round, run the same script with `<sha> --from <prev>
+   --context 30` instead, to read just what the amend changed; this counts only if you read <prev> with the script
+   earlier in this conversation, so a fresh reviewer reads <sha> in full. Name commits by SHA, not HEAD, and don't
+   pipe or filter this output: the review mark is only recorded if every part appears unaltered in your transcript.
+   If the script cannot show the change (binary content), say so in your report.
 2. Read the committer's notes: commit message, intent, known constraints, runtime hazards found, reviewer context,
    classification, and whether behaviour should be preserved. Treat them as claims to check, not conclusions.
 3. Read other files as they are at the reviewed commit (`git show <sha>:<path>`, `git grep <pattern> <sha>`), not
@@ -50,5 +52,5 @@ of:
     VERDICT: clean <sha>
     VERDICT: blocking
 
-`clean` means no blocking findings and no RECLASSIFY line (nits may remain). `<sha>` is the hex SHA (at least 7 characters) of the
-commit you reviewed, never the word HEAD.
+`clean` means no blocking findings and no RECLASSIFY line (nits may remain). `<sha>` is the hex SHA (at least 7
+characters) of the commit you reviewed, never the word HEAD.

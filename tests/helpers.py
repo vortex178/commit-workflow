@@ -62,8 +62,9 @@ class RepoCase(unittest.TestCase):
         with open(path, "w") as f:
             for number, call in enumerate(calls):
                 command, output, is_error = call if isinstance(call, tuple) else (call, None, False)
-                if output is None:
-                    output = run(command, self.repo, shell=True)
+                if output is None:  # stdout and stderr, as the Bash tool shows them
+                    output = subprocess.run(command, cwd=self.repo, shell=True, stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT, text=True, env=ENV).stdout
                 use = {"type": "tool_use", "id": "t%d" % number, "name": "Bash", "input": {"command": command}}
                 result = {"type": "tool_result", "tool_use_id": "t%d" % number, "content": output,
                           "is_error": is_error}
