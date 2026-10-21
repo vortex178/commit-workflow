@@ -40,8 +40,11 @@
   real maintenance traps block. Comment/wording nits are fixed in one batch without another review round. Tell the
   reviewer to report every instance of a problem, not just the first.
 - Security-sensitive changes (auth, crypto, input parsing, permissions) also get a security-review pass before pushing.
-- Rounds 2+ review only the amended delta against the previous round's commit (`git diff -U30 <prev> HEAD`, so
-  nearby code shows), still with a fresh-context reviewer.
+- Rounds 2+ review only the amended delta against the previous round's commit (`git diff -U30 <prev> <sha>`, so
+  nearby code shows). Resume the round-1 reviewer (SendMessage) instead of starting a new one, so its earlier reading
+  is reused. Its job is verify-only: check that each finding is fixed and the delta adds no new problem, and raise new
+  findings on unchanged code only if they are major. Start a fresh-context reviewer only when the fix delta is over
+  ~50 lines or changes the design, or the reviewer can no longer be resumed.
   If a finding reverses an earlier round's request, ask the user instead of applying it.
 - Stop after 3 rounds and report what is left, unless a round finds something major (bug or behaviour change): then
   keep going, up to 5 rounds, then stop and ask the user.
@@ -52,8 +55,9 @@
   the committer model; I launch each reviewer subagent on the planned model myself.
   - Reviewer = committer's model for logic-heavy or behaviour-sensitive diffs; a lower model (e.g. Sonnet) for
     mechanical moves, renames and docs. Tell the reviewer whether the commit is meant to preserve behaviour.
-  - On a logic-heavy diff, once a round's findings are only minor/nits, run later rounds on a lower model. A finding
-    that today's code cannot reach counts as minor here; it is still fixed.
+  - On a logic-heavy diff, once a round's findings are only minor/nits, any fresh reviewer started for later rounds
+    runs on a lower model; a resumed reviewer keeps its model. A finding that today's code cannot reach counts as
+    minor here; it is still fixed.
   - Lowering applies only when the committer is Sonnet or above; a Haiku committer gets a Haiku reviewer.
 - Keep context lean: fetch only the needed part of a page (a targeted query or one section), and never print the whole
   environment or other large outputs.
