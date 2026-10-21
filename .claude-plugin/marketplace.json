@@ -1,0 +1,11 @@
+{
+  "name": "commit-workflow",
+  "owner": { "name": "vortex178" },
+  "plugins": [
+    {
+      "name": "commit-workflow",
+      "source": "./",
+      "description": "Small, reviewed commits enforced by hooks."
+    }
+  ]
+}

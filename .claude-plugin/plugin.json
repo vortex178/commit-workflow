@@ -1,0 +1,9 @@
+{
+  "name": "commit-workflow",
+  "version": "0.1.0",
+  "description": "Small, reviewed commits: a commit-reviewer agent, and hooks that record each clean review as a git note.",
+  "author": {
+    "name": "vortex178"
+  },
+  "repository": "https://github.com/vortex178/commit-workflow"
+}
