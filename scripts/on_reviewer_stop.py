@@ -15,10 +15,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import review_notes  # noqa: E402
 
 REVIEWER = "commit-workflow:commit-reviewer"
-VERDICT_RE = re.compile(r"^[ \t>*`]*VERDICT:[ \t]*([a-z-]+)(?:[ \t]+([0-9a-f]{7,40}))?[ \t*`.]*$", re.M | re.I)
+VERDICT_RE = re.compile(r"^[ \t>*`]*VERDICT:[ \t]*([a-z-]+)(?:[ \t]+([0-9a-f]{7,64}))?[ \t*`.]*$", re.M | re.I)
 SEGMENT_SPLIT_RE = re.compile(r"&&|\|\||[;|\n]")
 GIT_READ_RE = re.compile(r"^\s*(?:\w+=\S*\s+)*git(?:\s+-[Cc]\s+\S+|\s+--[\w-]+(?:=\S+)?)*\s+(show|diff)(?:\s+(.*))?$")
-HEX_RE = re.compile(r"^[0-9a-f]{7,40}$")
 NO_PATCH = {"-s", "--no-patch", "-q", "--quiet", "--check", "--stat", "--shortstat", "--numstat", "--name-only",
             "--name-status", "--raw", "--summary", "--dirstat", "--compact-summary"}
 REDIRECT_RE = re.compile(r"\d*(?:>&\d+|[<>]{1,2}\s*\S+)")
@@ -66,7 +65,7 @@ def bash_reads(transcript_path):
 
 
 def names_commit(token, sha):
-    return bool(HEX_RE.match(token)) and sha.startswith(token)
+    return bool(review_notes.HEX_RE.match(token)) and sha.startswith(token)
 
 
 def read_the_patch(reads, sha):
@@ -83,7 +82,7 @@ def read_the_patch(reads, sha):
             if NO_PATCH.intersection(arg.split("=")[0] for arg in args) and not {"-p", "--patch"}.intersection(args):
                 continue
             revisions = [arg for arg in args if not arg.startswith("-")]
-            if match.group(1) == "show" and all(HEX_RE.match(rev) for rev in revisions) \
+            if match.group(1) == "show" and all(review_notes.HEX_RE.match(rev) for rev in revisions) \
                     and any(names_commit(rev, sha) for rev in revisions):
                 return True
             if match.group(1) == "diff":
@@ -116,6 +115,8 @@ def main():
     if not isinstance(event, dict) or event.get("agent_type") != REVIEWER:
         return 0
     cwd = event.get("cwd") or os.getcwd()
+    if not isinstance(cwd, str) or not os.path.isdir(cwd):
+        return 0
     head = review_notes.resolve("HEAD", cwd) if review_notes.is_repo(cwd) else None
     if head is None:
         return 0

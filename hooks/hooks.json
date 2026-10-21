@@ -1,5 +1,12 @@
 {
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/on_prompt.py\"" }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "matcher": "^commit-workflow:commit-reviewer$",

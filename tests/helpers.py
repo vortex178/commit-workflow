@@ -10,8 +10,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPTS = os.path.join(ROOT, "scripts")
 sys.path.insert(0, SCRIPTS)
 
-# Keep the caller's git environment (GIT_DIR and friends) out of the test repos, in this process and in children.
-for _key in [key for key in os.environ if key.startswith("GIT_")]:
+# Keep the caller's git environment (GIT_DIR and friends) and Claude Code project out of the test repos, in this
+# process and in children.
+for _key in [key for key in os.environ if key.startswith("GIT_") or key == "CLAUDE_PROJECT_DIR"]:
     del os.environ[_key]
 ENV = dict(os.environ)
 
@@ -21,17 +22,17 @@ def run(args, cwd, shell=False):
                           shell=shell).stdout.strip()
 
 
-def run_hook(script, event, cwd=None):
-    """Run a hook script with event as JSON on stdin; returns the CompletedProcess."""
+def run_hook(script, event, cwd=None, env=None):
+    """Run a hook script with event as JSON on stdin and env added to ENV; returns the CompletedProcess."""
     return subprocess.run([sys.executable, os.path.join(SCRIPTS, script)], input=json.dumps(event),
-                          capture_output=True, text=True, env=ENV, cwd=cwd)
+                          capture_output=True, text=True, env=dict(ENV, **(env or {})), cwd=cwd)
 
 
 class RepoCase(unittest.TestCase):
-    def setUp(self):
+    def setUp(self, object_format="sha1"):
         self._tmp = tempfile.TemporaryDirectory()
         self.repo = os.path.realpath(self._tmp.name)
-        self.git("init", "-q")
+        self.git("init", "-q", "-b", "main", *(["--object-format=" + object_format] if object_format != "sha1" else []))
         for key, value in (("user.email", "test@example.com"), ("user.name", "Test"), ("commit.gpgsign", "false")):
             self.git("config", key, value)
         self.commit("a.txt", "one\n")
