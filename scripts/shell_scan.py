@@ -1,9 +1,10 @@
 """Split shell text into simple commands, the way bash reads quotes, substitutions and here-documents.
 
-parse() returns nodes: ("cmd", words, substitutions, bodies) for each simple command, and "(" and ")" around a
-subshell. Words have quotes removed and redirections dropped; a word holding `$(...)`, backticks or `$((...))` keeps
-its raw text. Substitutions are the node lists of the `$(...)`, backtick and `<(...)` commands in the command (not
-those inside single quotes or quoted here-documents), and bodies its here-document bodies.
+parse() returns nodes: ("cmd", words, substitutions, bodies) for each simple command ("pipe" instead of "cmd" for
+one in a pipeline or run in the background), and "(" and ")" around a subshell. Words have quotes removed and
+redirections dropped; a word holding `$(...)`, backticks or `$((...))` keeps its raw text. Substitutions are the
+node lists of the `$(...)`, backtick and `<(...)` commands in the command (not those inside single quotes or quoted
+here-documents), and bodies its here-document bodies.
 """
 import re
 
@@ -25,7 +26,7 @@ class Scanner:
 
     def parse(self, stop=False):
         """Nodes up to the end of the text or, with stop, up to the `)` closing a substitution."""
-        nodes, words, subs, bodies, word, skip, pending, opened = [], [], [], [], None, False, [], 0
+        nodes, words, subs, bodies, word, skip, pending, opened, piped = [], [], [], [], None, False, [], 0, False
 
         def add(part):
             nonlocal word
@@ -40,11 +41,14 @@ class Scanner:
                 skip = False
             word = None
 
-        def end_command():
-            nonlocal words, subs, bodies, skip
+        def end_command(operator=""):
+            nonlocal words, subs, bodies, skip, piped
             end_word()
-            if words or subs or any(entry[3] is bodies for entry in pending):
-                nodes.append(("cmd", words, subs, bodies))
+            added = bool(words or subs or any(entry[3] is bodies for entry in pending))
+            if added:
+                nodes.append(("pipe" if piped or operator in ("|", "|&", "&") else "cmd", words, subs, bodies))
+            # A newline right after `|` continues the pipeline on the next line.
+            piped = operator in ("|", "|&") or piped and not added and operator == "\n"
             words, subs, bodies, skip = [], [], [], False
 
         text = self.text
@@ -88,8 +92,9 @@ class Scanner:
                 self.index += len(next(op for op in REDIRECTIONS if text.startswith(op, start)))
                 skip = True
             elif char in ";&|\n":
-                end_command()
-                self.index += len(next(op for op in OPERATORS if text.startswith(op, start)))
+                operator = next(op for op in OPERATORS if text.startswith(op, start))
+                end_command(operator)
+                self.index += len(operator)
                 if char == "\n":
                     for dash, delimiter, quoted, owner_bodies, owner_subs in pending:
                         owner_bodies.append(self.heredoc_body(dash, delimiter, quoted, owner_subs))

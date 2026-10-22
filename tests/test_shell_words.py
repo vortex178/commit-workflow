@@ -23,15 +23,24 @@ class CommandsTest(unittest.TestCase):
                         "bash -s x <<EOF\ngit push\nEOF", "git rebase -x 'git push' main"]:
             self.assertIn(["git", "push"], run_words(command), command)
 
+    def test_cd_forms_the_gate_does_not_follow_leave_the_directory_unknown(self):
+        for command in ["cd /a & x", "cd /a | cat; x", "cat | cd /a; x", "pushd /a && pushd && x", "pushd -n /a; x",
+                        "pushd /a; popd +1; x", "cd -0; x", "cd a b; x", "pwd |\ncd /a\nx",
+                        "pwd | # c\ncd /a\nx"]:
+            self.assertIn("$(", shell_words.commands(command, "/")[-1][0], command)
+
     def test_directories_follow_cd_and_pushd(self):
         found = shell_words.commands("cd /tmp && git status; pushd -q /usr; ls; popd; (cd /a && make) && pwd; "
                                      "env -C /b ls; out=\"$(git status)\"; env --chdir=/c ls; env -C/d ls; "
                                      "uv --directory /e run ls; cd /f; cd -; ls; cd; ls", "/")
-        self.assertEqual([(cwd, words[0]) for cwd, words, *_ in found if words[0] not in ("cd", "pushd", "popd")],
+        self.assertEqual([(cwd, words[0]) for cwd, words, *_ in found if words[:1] not in ([], ["cd"], ["pushd"],
+                                                                                         ["popd"])],
                          [("/tmp", "git"), ("/usr", "ls"), ("/a", "make"), ("/tmp", "pwd"), ("/b", "ls"),
                           ("/tmp", "git"), ("/c", "ls"), ("/d", "ls"), ("/e", "ls"), ("/tmp", "ls"),
                           (os.path.expanduser("~"), "ls")])
         self.assertEqual(shell_words.commands("git submodule foreach 'git push'", "/r")[0][0], "/r/$(each submodule)")
+        self.assertEqual([item[1:3] for item in shell_words.commands("X=1; { Y=2; }; Z=3 true", "/")],
+                         [([], ["X=1"]), ([], ["Y=2"]), (["true"], ["Z=3"])])  # assignments are kept
         plain = [(words[0], plain) for _, words, _, _, plain in shell_words.commands(
             "a $(b) && sudo c; bash -c 'd'; GIT_TRACE=1 e; if true; then f; fi", "/")]
         self.assertEqual(plain, [("b", False), ("a", True), ("c", False), ("d", False), ("bash", True), ("e", True),

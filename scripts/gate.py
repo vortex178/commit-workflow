@@ -45,32 +45,29 @@ NOTES_READS = {"", "show", "list", "get-ref"}
 READ_COMMANDS = {"log", "show", "rev-parse", "for-each-ref", "show-ref", "cat-file", "ls-tree", "rev-list", "grep",
                  "diff", "ls-remote", "reflog", "describe", "merge-base", "name-rev", "shortlog", "format-patch",
                  "status", "checkout"}
-HARMLESS = {"cd", "pushd", "popd", "echo", "printf", "true", ":", "pwd", "ls", "cat", "head", "tail", "grep", "wc",
-            "sleep", "date", "which", "test", "[", "[[", "set", "read"}  # may run before a push in the same line
-READ_FORMS = {"branch": ("-v", "-vv", "--verbose", "--merged", "--no-merged", "--contains", "--no-contains",
-                         "--points-at"), "tag": ("-l", "--list"), "remote": ("-v", "get-url", "show"),
-              "stash": ("list", "show"), "worktree": ("list",),
-              "config": ("--get", "--get-all", "--get-regexp", "--list", "-l")}  # or no operand
-STILL_COMMANDS = {  # git subcommands that move no commit, branch or HEAD
-    "status", "log", "show", "diff", "rev-parse", "ls-remote", "fetch", "describe", "shortlog", "rev-list", "cat-file",
-    "ls-files", "ls-tree", "grep", "blame", "show-ref", "for-each-ref", "merge-base", "name-rev", "version", "push"}
+BEFORE_PUSH = {("git", "branch", "--show-current"), ("git", "rev-parse", "--abbrev-ref", "HEAD"),
+               ("git", "rev-parse", "--show-toplevel"), ("pwd",)}  # substitutions agents put in a push line
+SUBSTITUTIONS = {"$(%s)" % " ".join(entry) for entry in BEFORE_PUSH}
 HOOK_SCRIPTS = {"on_prompt.py", "on_reviewer_stop.py"}
 LAUNCHERS = {"npx", "bunx", "pnpx", "pnpm", "yarn"}
 IMPORT_RE = re.compile(r"\b(?:review_notes|on_prompt|on_reviewer_stop|write_mark)\b")
-NOTES_REF_RE = re.compile(r"(?:^|[:+])refs/notes/review(?:$|[:~^@])")
-ASSIGNMENT_RE = re.compile(r"(?:^|[;&|\n(])\s*(\w+=\S*)")
+NOTES_REF_RE = re.compile(r"(?:^|[:+])refs/notes/review(?:$|[:~^@])", re.I)  # refs can be files on a case-blind disk
 LINE_NOTES_RE = re.compile(r"\b(?:GIT_NOTES_REWRITE_REF=\S*(?:review|\*)|GIT_CONFIG_\w+=\S*notes)", re.I)
 NOTES_SETTING_RE = re.compile(r"^(?:git_notes_ref|git_notes_rewrite_ref|core\.notesref|notes\.rewriteref)=.*"
-                              r"(?:review|\*)", re.I)
+                              r"(?:review|\*|\$)", re.I)  # $: a value the gate cannot see
 NOTES_REF_OPTION_RE = re.compile(r"^--r(?:e|ef)?(?:=(.*))?$")  # git accepts --ref abbreviated
-REMOTE_DEST_RE = re.compile(r":(?:refs/)?remotes/([^/]*)")
-NOTES_DEST_RE = re.compile(r":(?:refs/)?notes/(?:review|\*)$")
-NOTES_SOURCE_RE = re.compile(r"^\+?(?:refs/)?notes/(?:review|\*)(?:$|:)")
+REMOTE_DEST_RE = re.compile(r":(?:refs/)?remotes/([^/]*)", re.I)
+NOTES_DEST_RE = re.compile(r":(?:refs/)?notes/(?:review|\*)$", re.I)
+NOTES_SOURCE_RE = re.compile(r"^\+?(?:refs/)?notes/(?:review|\*)(?:$|:)", re.I)
 OVERRIDE_RE = re.compile(r"^(?:url\..*\.(?:push)?insteadof|remote\..*\.(?:url|fetch))=", re.I)
 PYTHON_RE = re.compile(r"^python[0-9.]*$")
 RISKY_RE = re.compile(r"\b(?:push|notes|update-ref|symbolic-ref|fetch|pull|fast-import|claude|pr)\b|review_notes|"
                       r"write_mark|on_prompt|on_reviewer_stop")
 APPROVAL_RE = re.compile(r"\bapproved?\b", re.I)
+SAFE_SETTING_RE = re.compile(r"^(?:GIT_DIR|GIT_TERMINAL_PROMPT|GIT_TRACE\w*)=")  # VAR= that leave what is pushed
+GH_SETTING_RE = re.compile(r"^(?:GH_\w*|NO_COLOR|PAGER)=")  # also allowed for gh (not GH_REPO/HOST)
+GITLINK_RE = re.compile(r"^:\d+ 160000 ", re.M)  # a --raw line that adds or changes a submodule commit
+GITLINK_TIMEOUT = 20  # seconds; a timeout denies the push
 SHORT_DRY_RE = re.compile(r"^-[46fquv]*[nd][46dfnquv]*$")  # -n or -d among push's short options
 LEAD_RE = re.compile(r"^\s*(?:/[\w:-]+\s+)?(?:(?:every\s+)?\d+\s*[smhd]\w*\s+)?", re.I)  # "/loop 5m ..."
 PROMPT_KEYS = {"prompt", "message", "messages", "text", "content", "body", "args", "input"}
@@ -88,8 +85,7 @@ def is_hook_script(directory, path):
     if os.path.basename(path) not in HOOK_SCRIPTS:
         return False
     path = os.path.join(directory, os.path.expanduser(path))
-    return "$" in path or os.path.isfile(os.path.join(os.path.dirname(path),
-                                                                                  "review_notes.py"))
+    return "$" in path or os.path.isfile(os.path.join(os.path.dirname(path), "review_notes.py"))
 
 
 def operands(args, value_options):
@@ -110,7 +106,7 @@ def remotes(directory):
 
 def covers(pattern, namespace):
     """Whether a wildcard ref pattern such as `refs/*` or `refs/r*` reaches refs/<namespace>/."""
-    prefix = pattern.lstrip("+").split("*")[0] if "*" in pattern else None
+    prefix = pattern.lstrip("+").split("*")[0].lower() if "*" in pattern else None
     return prefix is not None and any(name.startswith(prefix) for name in ("refs/%s/" % namespace, namespace + "/"))
 
 
@@ -144,7 +140,8 @@ def git_problem(command, directory, words, settings, assigned):
     if not parts:
         return None
     directory, sub, args, configs = parts
-    keys = operands(args, set()) if sub == "config" else []
+    keys = operands(args, {"-f", "--file", "--blob", "-t", "--type", "--comment", "--default", "--value"}) \
+        if sub == "config" else []
     setting = "=".join(keys[1:3] if keys[:1] == ["set"] else keys[:2])  # `git config [set] KEY VALUE`
     named = any(NOTES_REF_RE.search(arg) for arg in args) or \
         any(NOTES_SETTING_RE.match(item) for item in settings + configs + [setting]) or \
@@ -152,15 +149,15 @@ def git_problem(command, directory, words, settings, assigned):
     reading = sub in READ_COMMANDS
     if sub == "notes":
         ref, action = notes_ref_and_action(args)
-        named = named or ref in ("review", "notes/review", review_notes.NOTES_REF) or \
-            bool(re.search(r"\bGIT_NOTES_REF=\S*review", assigned))  # also when exported earlier in the line
+        named = named or ref.lower() in ("review", "notes/review", review_notes.NOTES_REF) or \
+            bool(re.search(r"\bGIT_NOTES_REF=\S*review", assigned, re.I))  # also when exported earlier in the line
         reading = action in NOTES_READS
     if sub in ("fetch", "pull", "push"):  # only what they write counts; a fetched source only fills FETCH_HEAD
         specs = operands(args, FETCH_VALUE_OPTIONS | PUSH_VALUE_OPTIONS)
         remote, refspecs = (specs[0], specs[1:]) if specs else ("", [])
         refspecs += [value for option, value in zip(args, args[1:]) if option == "--refmap"] + \
             [arg[len("--refmap="):] for arg in args if arg.startswith("--refmap=")]
-        if sub != "push" and ("--stdin" in args and re.search(r"notes/|remotes/", command) or
+        if sub != "push" and ("--stdin" in args and re.search(r"notes/|remotes/", command, re.I) or
                               any(OVERRIDE_RE.match(item) for item in configs) or
                               any(item.startswith("GIT_CONFIG") for item in settings)):
             return "a fetch uses the remote's configured URL and refspecs, since remote-tracking refs show what " \
@@ -177,22 +174,25 @@ def git_problem(command, directory, words, settings, assigned):
         return None
     if named and not reading:
         return "review marks are written only by the review hooks and carry.py"
+    if sub == "notes" and not ref and not reading:
+        return "name the notes ref with --ref, since GIT_NOTES_REF may point at the review marks"
     if sub in ("update-ref", "fast-import") and ("--stdin" in args or sub == "fast-import") \
-            and re.search(r"notes/review|remotes/", command):
+            and re.search(r"notes/review|remotes/", command, re.I):
         return "review marks and remote-tracking refs are not written through --stdin or fast-import"
     writes = sub == "update-ref" and "-d" not in args or sub == "symbolic-ref" and \
         ("-d" in args or "--delete" in args or len(operands(args, {"-m"})) > 1)
-    if writes and any(arg.startswith("refs/remotes/") for arg in args):
+    if writes and any(arg.lower().startswith("refs/remotes/") for arg in args):
         return "remote-tracking refs move only by fetching from their own remote, since they show what is pushed"
     return None
 
 
 def lock_problem(command, found):
     """Why the command touches the marks or the hooks, or None."""
-    assigned = " ".join([word for _, words, settings, *_ in found for word in settings + (
-        words[1:] if words[0] in ("export", "declare", "typeset") or words[:2] == ["builtin", "export"] else [])] +
-        ASSIGNMENT_RE.findall(command))  # VAR=value words, also of a line that only assigns
+    assigned = " ".join(word for _, words, settings, *_ in found for word in settings + (
+        words[1:] if words[:1] in (["export"], ["declare"], ["typeset"]) or words[:2] == ["builtin", "export"] else []))
     for directory, words, settings, bodies, _ in found:
+        if not words:
+            continue
         name = os.path.basename(words[0])
         if PYTHON_RE.search(name):
             reason = python_problem(command, directory, words, bodies)
@@ -242,12 +242,14 @@ MIRROR = ["--exclude=refs/notes/*", "--exclude=refs/stash", "--all"]  # the mark
 
 def push_target(args, directory, configs):
     """(remote, revisions the push sends) from git push's arguments; revisions None if nothing is sent."""
-    positional, remote, revisions, index = [], None, [], 0
+    positional, remote, revisions, index, nothing = [], None, [], 0, False
     while index < len(args):
         arg = args[index]
         if arg in ("--delete", "--dry-run") or SHORT_DRY_RE.match(arg):
-            return None, None
-        if arg in ("--all", "--branches"):
+            nothing = True
+        elif arg.startswith("--no-d"):  # --no-dry-run or --no-delete, perhaps abbreviated: the last one wins
+            nothing = False
+        elif arg in ("--all", "--branches"):
             revisions.append("--branches")
         elif arg == "--mirror":
             revisions += MIRROR
@@ -255,12 +257,14 @@ def push_target(args, directory, configs):
             revisions.append("--tags")
         elif arg.startswith("--repo="):
             remote = arg[len("--repo="):]
-        elif arg in PUSH_VALUE_OPTIONS:
+        elif arg in PUSH_VALUE_OPTIONS or is_recurse(arg):
             remote = args[index + 1] if arg == "--repo" and index + 1 < len(args) else remote
             index += 1
         elif not arg.startswith("-"):
             positional.append(arg)
         index += 1
+    if nothing:
+        return None, None
     remote, specs = positional[0] if positional else remote, positional[1:]
     revisions += sources(specs)
     if remote is None:
@@ -279,6 +283,25 @@ def push_target(args, directory, configs):
             sources(pushes) if pushes else \
             ["--branches"] if config(directory, configs, "push.default") == "matching" else ["HEAD"]
     return remote, revisions or None
+
+
+def is_recurse(arg):
+    """Whether arg is push's --recurse-submodules (abbreviated to at least --recu) with its value in the next word."""
+    return len(arg) >= 6 and "--recurse-submodules".startswith(arg)
+
+
+def recurse_value(args):
+    """The value of push's last --recurse-submodules option ("no" for --no-recurse-submodules), or None."""
+    value, index = None, 0
+    while index < len(args):
+        name, equals, given = args[index].partition("=")
+        if is_recurse(name):
+            value = given if equals else args[index + 1] if index + 1 < len(args) else ""
+            index += 0 if equals else 1
+        elif len(name) >= 9 and "--no-recurse-submodules".startswith(name):
+            value = "no"
+        index += 1
+    return value
 
 
 def is_local(url):
@@ -337,22 +360,27 @@ def pushes(words, directory, settings):
         else None
 
 
-def still(directory, words, settings):
-    """Whether a command run before a push in the same line surely leaves commits, branches and HEAD alone."""
-    parts = shell_words.git_parts(words, directory, settings) or pushes(words, directory, settings)
-    if not parts:
-        name = os.path.basename(words[0])
-        return name in HARMLESS or name == "export" and \
-            all(re.match(r"^(?!GIT_)|GIT_TRACE", word) for word in words[1:])  # GIT_DIR and such move the push
-    sub, args = parts[1], parts[2]
-    return sub in STILL_COMMANDS or sub in READ_FORMS and \
-        (not operands(args, ()) or any(arg.split("=")[0] in READ_FORMS[sub] for arg in args))
+def still(words, settings):
+    """Whether a command may run before a push in the same line: a cd, pushd or popd (whose directory the scanner
+    follows, or marks unknown) or a substitution in BEFORE_PUSH, without VAR= settings or expansions such as
+    ${VAR:=x}. Anything else may change commits, the configuration or the environment."""
+    return not settings and all("$" not in word and "`" not in word or word in SUBSTITUTIONS for word in words) and \
+        (words[:1] in (["cd"], ["pushd"], ["popd"]) or tuple(words) in BEFORE_PUSH)
+
+
+def safe_settings(words, settings):
+    """Whether the VAR= settings of a git push or gh command leave what it reads alone (gh does not read GIT_DIR)."""
+    gh = os.path.basename(words[0]) == "gh"
+    return all(gh and GH_SETTING_RE.match(item) or SAFE_SETTING_RE.match(item) and
+               not (gh and item.startswith("GIT_DIR=")) for item in settings)
 
 
 def push_problem(found):
     """Why a push in the command would send unreviewed commits, or None. Only a plain `git push` (or gh command)
     is read; one inside a substitution, shell script, eval or alias, or behind a wrapper, is denied."""
     for number, (directory, words, settings, _, plain) in enumerate(found):
+        if not words:
+            continue
         parts = pushes(words, directory, settings)
         if not parts and not any(pushes(words[index:], directory, []) for index in range(1, len(words))):
             continue
@@ -366,9 +394,14 @@ def push_problem(found):
             return "could not read the repository `%s` runs in" % " ".join(words)
         if any("$" in arg or "`" in arg for arg in args):
             return "could not tell what `%s` sends; name the remote and branches literally" % " ".join(words)
-        if not all(still(*item[:3]) for item in found[:number]):
+        if not safe_settings(words, settings) or \
+                any("$" in item or "`" in item or item.lower().startswith("include") for item in configs):
+            return "run it without VAR= settings (other than GIT_TERMINAL_PROMPT, GIT_TRACE and, for git, GIT_DIR; " \
+                "for gh, GH_*, NO_COLOR and PAGER), --config-env, -c include or -c values from variables, so the " \
+                "gate reads the configuration git does"
+        if not all(still(*item[1:3]) for item in found[:number]):
             return "the gate checks a push against the repository as it is before the command runs; run the push " \
-                "as its own command, after the commands that change commits or branches"
+                "as its own command (a cd before it is fine)"
         remote, revisions = push_target(args, directory, configs)
         if revisions is None:
             continue
@@ -400,6 +433,14 @@ def push_problem(found):
                     "for a tiny commit, ask the user to reply 'Approved'; after nit fixes, run carry.py OLD) as the "
                     "commit workflow says" % (len(missing), hint,
                                                     ", ".join(sha[:12] for sha in missing[:20])))
+        if recurse_value(args) not in ("check", "no"):  # git may push the submodule commits that new commits name
+            raw = review_notes.git(["-c", "log.diffMerges=separate", "log", "--format=", "--raw", "--no-abbrev", "-m",
+                                    "--root", "--ignore-submodules=none", *revisions, "--not",
+                                    *(["--remotes=%s/*" % remote] if remote else []), "--"],
+                                   directory, timeout=GITLINK_TIMEOUT)  # only the target counts here, as in git
+            if raw.returncode != 0 or GITLINK_RE.search(raw.stdout):
+                return "the gate does not check submodule commits; push each submodule on its own, then push this " \
+                    "repository with --recurse-submodules=check"
     return None
 
 
@@ -449,9 +490,11 @@ def pr_problem(command, found):
                 not review_notes.is_repo(directory) or any("$" in arg or "`" in arg for arg in args):
             return "could not tell which branch `%s` is for; cd to its checkout and give values literally" % \
                 " ".join(words)
-        if not all(still(*item[:3]) for item in found[:number]):
+        if not all(still(*item[1:3]) for item in found[:number]):
             return "the gate checks a pull request against the repository as it is before the command runs; run " \
-                "it as its own command"
+                "it as its own command (a cd before it is fine)"
+        if not safe_settings(words, settings):
+            return "run it without VAR= settings other than GH_*, NO_COLOR, PAGER, GIT_TERMINAL_PROMPT and GIT_TRACE"
         head = review_notes.resolve("HEAD", directory)
         branch = review_notes.git(["symbolic-ref", "--quiet", "--short", "HEAD"], directory).stdout.strip()
         if head is None:

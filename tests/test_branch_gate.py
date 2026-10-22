@@ -62,8 +62,11 @@ class BranchGateTest(GateCase):
         self.assert_denied("gh pr create --fill", "lacks a whole-branch review")
         self.review_branch(self.base)
         for command in ["gh pr create --fill", "gh pr create -Hfeat --base=main", "gh pr merge --squash -t done",
-                        "git status && gh pr merge -d"]:
+                        "cd . && gh pr merge -d"]:
             self.assert_allowed(command)
+        self.assert_denied("git status && gh pr merge -d", "run it as its own command")
+        self.assert_denied("GIT_DIR=.git gh pr merge -d", "without VAR= settings")
+        self.assert_allowed("GH_PAGER=cat NO_COLOR=1 gh pr merge -d")
         unrelated = self.git("commit-tree", "HEAD^{tree}", "-m", "unrelated")
         self.git("push", "-q", "origin", unrelated + ":refs/heads/other")
         self.assert_denied("gh pr create -B other", "shares no history with origin/other")

@@ -62,5 +62,4 @@ of:
     VERDICT: blocking
 
 `clean` (or `branch-clean` for a whole-branch review) means no blocking findings and no RECLASSIFY line (nits may
-remain). `<sha>` is the hex SHA (at least 7
-characters) of the commit you reviewed, never the word HEAD.
+remain). `<sha>` is the hex SHA (at least 7 characters) of the commit you reviewed, never the word HEAD.

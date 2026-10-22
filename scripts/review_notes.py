@@ -17,10 +17,11 @@ ENV = dict({key: value for key, value in os.environ.items() if not key.startswit
 DIFF = ["diff-tree", "-r", "--no-textconv", "--no-ext-diff", "--ignore-submodules=none", "--no-color"]
 
 
-def git(args, cwd, stdin=None, text=True):
-    """Run git; with text=False, stdin and the output are bytes."""
+def git(args, cwd, stdin=None, text=True, timeout=None):
+    """Run git; with text=False, stdin and the output are bytes. subprocess.TimeoutExpired after timeout seconds."""
     decode = {"encoding": "utf-8", "errors": "replace"} if text else {}
-    return subprocess.run(["git", *args], cwd=cwd, input=stdin, capture_output=True, env=ENV, **decode)
+    return subprocess.run(["git", *args], cwd=cwd, input=stdin, capture_output=True, env=ENV, timeout=timeout,
+                          **decode)
 
 
 def is_repo(cwd):

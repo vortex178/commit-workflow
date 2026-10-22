@@ -28,6 +28,8 @@ class ScanTest(unittest.TestCase):
             self.assertIn(["git", "push"], run_words(command), command)
         self.assertEqual(shell_scan.parse("(cd a && b) && c"), ["(", ("cmd", ["cd", "a"], [], []),
                                                                 ("cmd", ["b"], [], []), ")", ("cmd", ["c"], [], [])])
+        self.assertEqual([node[0] for node in shell_scan.parse("a | b & c; d && e |& f")],
+                         ["pipe", "pipe", "cmd", "cmd", "pipe", "pipe"])
 
     def test_comments_continuations_and_here_documents_do_not_hide_commands(self):
         for command in ["git status # don't\ngit push", "git \\\n push", "cat > m.txt <<'X'\ndon't\nX\ngit push",

@@ -60,8 +60,13 @@ skill and follow it. Review is mandatory for every commit.
   or `gh repo create --push`) while a commit it would send has no clean mark, naming the SHAs. It also denies agent
   writes to `refs/notes/review`, moves of remote-tracking refs, running the hook scripts, and prompts starting with
   `Approved` sent through tools. It reads only a plain `git push` run as its own command: pushes inside `$(...)`,
-  `bash -c`, eval, an alias or a wrapper such as `env` or `sudo`, and pushes after a command that may change commits
-  in the same line, are denied with a message saying to run them plainly.
+  `bash -c`, eval, an alias or a wrapper such as `env` or `sudo`, and pushes after any command in the same line other
+  than `cd`, `pushd`, `popd` or a substitution such as `$(git branch --show-current)`, are denied with a message
+  saying to run them plainly. So are pushes with `VAR=` settings (other than `GIT_DIR`, `GIT_TERMINAL_PROMPT` and
+  `GIT_TRACE*`; for `gh`, also `GH_*`, `NO_COLOR` and `PAGER`, but not `GIT_DIR`), `--config-env`, `-c include` or
+  `-c` values from variables, and pushes of commits that change a submodule, unless they pass
+  `--recurse-submodules=check` or `no` (push the submodule first). `git notes` writes must name their ref with
+  `--ref`.
 - **Pull request gate.** `gh pr create` and `gh pr merge` are denied until the branch tip has a `branch-clean` mark:
   a reviewer read `show_change.py <tip> --base <merge-base>` and ended with `VERDICT: branch-clean <tip>`, and that
   base is on the pull request's base branch.
@@ -103,11 +108,14 @@ directory. In `.claude/settings.json` (check the
 
 ## Known limits
 
-- The gate reads a command line, not scripts written to disk, edits of `.git` files, third-party pushers (`jj`, `gt`,
-  `hub`) or tools that commit and push (`npm version`): a push after a command it does not know to be harmless is
-  denied, but a push made inside another tool is not seen.
+- The gate reads a command line, not scripts written to disk, edits of `.git` files or of git config files such as
+  `~/.gitconfig` (made by an earlier command or a redirection), third-party pushers (`jj`, `gt`, `hub`) or tools
+  that commit and push (`npm version`): a push after another command in the same line is denied, but a push made
+  inside another tool is not seen.
 - Denied by design rather than handled: wrappers around `git push` or `gh pr`, `export GIT_SSH_COMMAND=...` before a
   push, loops that push before they commit.
+- A shell reading commands from a pipe (`... | sh`) cannot be read; it is denied only when the line contains a word
+  such as `push`, `notes` or `pr`, so a push through an alias piped into a shell is not seen.
 - Falsely denied: a commit message that quotes a notes setting after `;` or `(` (use `git commit -F file`).
 - `gh pr` checks: `gh api` merges, `gh` aliases, `gh pr edit --base` and the web UI are not covered; commits added to
   the remote branch since the last fetch are not seen.

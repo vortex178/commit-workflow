@@ -73,12 +73,13 @@ Work one commit per step, on the branch checked out in the session workspace.
    flagged, cut or simplify it rather than expanding it; think design tweaks through rather than patching symptoms.
    When only comment/wording nits were fixed, run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/carry.py" <old-sha>`
    (Reference: Nit carry); if it refuses or cannot write, have the commit reviewed again.
-6. Later rounds review only the amended delta against the previous round's commit (`git diff -U30 <prev> <sha>`, so
-   nearby code shows). Resume the round-1 reviewer (SendMessage) instead of starting a new one, so its earlier reading
-   is reused. Its job is verify-only: check that each finding is fixed and the delta adds no new problem, and raise new
-   findings on unchanged code only if they are major. Start a fresh-context reviewer only in the cases the Reference
-   names, or when the reviewer can no longer be resumed. If a finding reverses an earlier round's request, ask the
-   user instead of applying it. Observe the round cap (Reference).
+6. Later rounds review only the amended delta against the previous round's commit, with nearby code: `python3
+   "${CLAUDE_PLUGIN_ROOT}/scripts/show_change.py" <sha> --from <prev> --context 30`. Resume the round-1 reviewer
+   (SendMessage) instead of starting a new one, so its earlier reading is reused. Its job is verify-only: check that
+   each finding is fixed and the delta adds no new problem, and raise new findings on unchanged code only if they are
+   major. Start a fresh-context reviewer only in the cases the Reference names, or when the reviewer can no longer be
+   resumed. If a finding reverses an earlier round's request, ask the user instead of applying it. Observe the round cap
+   (Reference).
 7. When the review is clean, push to the current branch, confirm CI passes, then continue. Without CI, run the
    project's local test and lint commands instead. With slow CI, start the next commit while it runs; a failure then
    gets a new commit. Re-run a suspected flaky failure once before treating it as real. While an earlier commit
@@ -123,9 +124,12 @@ Haiku reviewer and the run does not stop for them; this applies to that request 
 - Approval: only a message the user writes, starting with `Approved`, marks tiny commits as manually reviewed. Never
   send, schedule or type that word as an agent.
 - Push gate: `git push` (and `gh pr create`) is denied while a commit it sends lacks a mark. Run it as its own plain
-  command: not inside `$(...)`, `bash -c`, eval, an alias or a wrapper such as env or sudo, not after a command in
-  the same line that may change commits, with the remote and branches named literally. Commits already on the push
-  target or on a remote with a network URL count as pushed, and a merge git made without conflicts needs no mark.
+  command: not inside `$(...)`, `bash -c`, eval, an alias or a wrapper such as env or sudo, not after other commands
+  in the same line (a `cd` is fine), with the remote and branches named literally, without VAR= settings other than
+  GIT_DIR, GIT_TERMINAL_PROMPT and GIT_TRACE* (for gh: GH_*, NO_COLOR, PAGER, GIT_TERMINAL_PROMPT and GIT_TRACE*).
+  Commits that change a submodule are pushed with `--recurse-submodules=check`, after the submodule itself. Commits
+  already on the push target or on a remote with a network URL count as pushed, and a merge git made without
+  conflicts needs no mark.
 - Pull request gate: `gh pr create` and `gh pr merge` are denied until the branch tip has a `branch-clean` mark
   from the PR's base branch. Run them plainly from the branch's checkout, with HEAD equal to its upstream, without
   `-R`, `GH_REPO`/`GH_HOST`, a PR argument to merge, or `--head` naming another branch or a fork.

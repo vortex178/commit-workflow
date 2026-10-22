@@ -41,16 +41,25 @@ class MarkLockTest(GateCase):
                         "export GIT_NOTES_REWRITE_REF=refs/notes/review; git commit --amend",
                         "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=notes.rewriteRef GIT_CONFIG_VALUE_0=x git rebase main",
                         "set -a; GIT_NOTES_REWRITE_REF=refs/notes/review; git commit --amend",
-                        "builtin export GIT_NOTES_REF=refs/notes/review; git notes add -m x"]:
+                        "builtin export GIT_NOTES_REF=refs/notes/review; git notes add -m x",
+                        "git notes --ref REVIEW add -m x HEAD", "git update-ref Refs/Notes/Review HEAD",
+                        "git config --file .git/config notes.rewriteRef 'refs/notes/*'",
+                        "git config --type path notes.rewriteRef 'refs/notes/*'",
+                        "git config --comment x notes.rewriteRef 'refs/notes/*'",
+                        "FOO=refs/notes/review git --config-env=core.notesRef=FOO notes add -m x"]:
             self.assert_denied(command, "review marks are written only")
         self.git("remote", "add", "origin", self.repo)
         for command in ["git update-ref refs/remotes/origin/main HEAD", "git fetch . HEAD:refs/remotes/origin/main",
                         "git pull . main:remotes/origin/main", "git fetch origin main:refs/remotes/upstream/main",
                         "git push . HEAD:refs/remotes/origin/main", "git symbolic-ref refs/remotes/origin/HEAD x",
                         "git fetch ../c '+refs/r*:refs/r*'", "git fetch --refmap='+refs/heads/*:refs/remotes/o/*' . x",
-                        "git fetch --refmap +refs/heads/*:refs/remotes/o/* . x"]:
+                        "git fetch --refmap +refs/heads/*:refs/remotes/o/* . x",
+                        "git update-ref REFS/remotes/origin/main HEAD", "git push . HEAD:Refs/Remotes/origin/main"]:
             self.assert_denied(command, "remote-tracking refs move only")
         self.assert_denied("echo 'update refs/remotes/origin/main HEAD' | git update-ref --stdin", "--stdin")
+        self.assert_denied("git notes add -m x", "name the notes ref with --ref")
+        for command in ["git notes --ref other add -m x", "git notes show", "git notes"]:
+            self.assert_allowed(command)
         for command in ["echo HEAD:refs/remotes/origin/main | git fetch --stdin .",
                         "git -c url./tmp/c.insteadOf=%s fetch origin" % self.repo, "git -c remote.origin.url=x pull",
                         "GIT_CONFIG_COUNT=1 git fetch origin"]:
@@ -124,8 +133,8 @@ class PushGateTest(GateCase):
         sha = self.commit("b.txt", "two\n")
         self.git("tag", "v1", "HEAD~1")
         for command in ["git push", "git push -u origin main", "git -C %s push" % self.repo, "cd . && git push -f",
-                        "git push --all", "echo ok; git push 2>&1", "git push %s main" % self.remote,
-                        "if true; then git push; fi", "git status # don't\ngit push", "(cd . && git push)",
+                        "git push --all", "git push 2>&1", "git push %s main" % self.remote,
+                        "(cd . && git push)",
                         "GIT_TRACE=1 git push", "git --git-dir=%s/.git push" % self.repo, "git push origin tag v1 main",
                         "git -c push.default=matching push", "git push origin 'refs/heads/*:refs/heads/*'",
                         "git push -u origin $(git branch --show-current)", "gh pr create --fill",
@@ -148,12 +157,10 @@ class PushGateTest(GateCase):
         review_notes.write_mark(sha, self.repo, CLEAN)
         self.assert_allowed("git push origin main")
         self.assert_denied("gh pr create -H other", "Pull request blocked")  # not a push, but the PR gate's
-        for command in ["git status && git remote -v && git stash list && git push origin main",
-                        "cd . && echo ok && git config --get remote.origin.url && git push origin main",
-                        "[[ -z $(git status --porcelain) ]] && export GIT_TRACE=1 && set -e; git push origin main",
-                        "git branch --merged main && git branch --contains=HEAD && git push origin main"]:
+        for command in ["cd . && pushd . && git push origin main", "git push origin $(git branch --show-current)"]:
             self.assert_allowed(command)
-        for command in ["git commit -q --allow-empty -m x && git push",
+        for command in ["git commit -q --allow-empty -m x && git push", "git status && git push origin main",
+                        "if true; then git push; fi", "git status # don't\ngit push", "echo ok; git push 2>&1",
                         "git checkout -q -b feat && git push origin HEAD",
                         "git branch -f main HEAD~1; git push origin main", "gh pr checkout 1 && git push",
                         "npm version patch && git push --follow-tags", "export GIT_DIR=.git; git push origin main"]:
@@ -190,6 +197,73 @@ class PushGateTest(GateCase):
         self.assert_denied("git push", sha[:12])
         review_notes.write_mark(sha, self.repo, CLEAN)
         self.assert_allowed("git push --mirror")  # the marks are not commits to review
+
+    def test_settings_that_change_what_is_pushed_are_denied(self):
+        self.git("switch", "-q", "-c", "side")
+        sha = self.commit("b.txt", "two\n")
+        self.git("switch", "-q", "main")
+        for command in ["GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.default GIT_CONFIG_VALUE_0=matching git push",
+                        "GIT_CONFIG_PARAMETERS=\"'push.default'='matching'\" git push", "GIT_CONFIG_GLOBAL=x git push",
+                        "git -c include.path=x push", "git -c includeIf.onbranch:main.path=x push",
+                        "HOME=../h git push", "XDG_CONFIG_HOME=x git push", "git -c remote.origin.push=$F push",
+                        "git --config-env=remote.origin.push=F push", "git --config-env remote.origin.push=F push"]:
+            self.assert_denied(command, "without VAR= settings")
+        for command in ["set -a; GIT_DIR=/other/.git; git push", "set -o allexport; GIT_CONFIG_COUNT=1; git push",
+                        "set -ea; GIT_CONFIG_GLOBAL=x; git push", "set -o ALL_EXPORT; X=1; git push",
+                        "set +o NO_ALL_EXPORT; git push", "HOME=/x; git push", "{ HOME=/x; }; git push",
+                        "if true; then HOME=/x; fi; git push", "LC_ALL=C true && git push", "set -e; git push",
+                        "export HOME=/x; git push", "read HOME <<< /x; git push", "printf -v HOME %s /x; git push",
+                        "echo ${HOME::=/x}; git push", "printf '[push]' >> ~/.gitconfig; git push",
+                        "cd ${HOME::=/x}; cd %s && git push" % self.repo,
+                        "cd $((HOME=1)); cd %s && git push" % self.repo]:
+            self.assert_denied(command, "run the push as its own command")
+        for command in ["GIT_TERMINAL_PROMPT=0 git push", "GIT_TRACE=1 git push", "cd . && git push"]:
+            self.assert_allowed(command)
+        self.assert_denied("GH_PAGER=cat NO_COLOR=1 gh pr create --fill", "Pull request blocked")  # not the push gate
+        self.assert_denied("HOME=/x gh pr create --fill", "without VAR= settings")
+        self.assert_denied("GIT_DIR=.git gh pr create --fill", "without VAR= settings")
+        for command in ["cd .. & git push", "cd .. | pwd; git push", "pushd .. && pushd && git push",
+                        "pushd -n .. && git push", "cd a b && git push", "pwd |\ncd %s\ngit push" % self.repo]:
+            self.assert_denied(command, "could not tell which repository")
+        for command in ["git push --dry-run --no-dry-run origin side", "git push -n --no-dry origin side",
+                        "git push --delete --no-delete origin side"]:
+            self.assert_denied(command, sha[:12])
+        self.assert_allowed("git push --no-dry-run --dry-run origin side")
+
+    def test_pushes_that_may_push_submodules_are_denied(self):
+        self.assert_allowed("git push --recurse-submodules=on-demand origin main")  # sends nothing
+        self.git("update-index", "--add", "--cacheinfo", "160000,%s,sub" % self.head())
+        self.git("commit", "-q", "-m", "sub")
+        review_notes.write_mark(self.head(), self.repo, CLEAN)
+        for command in ["git push origin main", "git push --recurse-submodules=on-demand origin main",
+                        "git push --recu on-demand origin main", "GIT_DIR=.git git push origin main",
+                        "git push --recurse-submodules=check --recurse-submodules=only origin main",
+                        "git push --recurse-submodules=on-demand --receive-pack=git-receive-pack origin main"]:
+            self.assert_denied(command, "submodule commits")
+        for command in ["git push --recurse-submodules=check origin main", "git push --no-recurse-submodules",
+                        "git push --recu no origin main"]:
+            self.assert_allowed(command)
+        self.git("config", "diff.ignoreSubmodules", "all")  # hides gitlinks from git log --raw unless overridden
+        self.git("remote", "add", "upstream", "https://example.invalid/up.git")
+        self.git("update-ref", "refs/remotes/upstream/main", "HEAD")  # on a trusted remote, but not on the target
+        self.assert_denied("git push origin main", "submodule commits")
+        self.git("switch", "-q", "--orphan", "root")
+        self.git("update-index", "--add", "--cacheinfo", "160000,%s,sub" % self.git("rev-parse", "main"))
+        self.git("commit", "-q", "-m", "root")
+        review_notes.write_mark(self.head(), self.repo, CLEAN)
+        self.git("config", "log.showRoot", "false")
+        self.assert_denied("git push origin root", "submodule commits")
+
+    def test_a_merge_that_changes_a_submodule_is_seen(self):
+        self.git("config", "log.diffMerges", "off")
+        self.git("switch", "-q", "-c", "side")
+        review_notes.write_mark(self.commit("b.txt", "two\n"), self.repo, CLEAN)
+        self.git("switch", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "--no-commit", "side")
+        self.git("update-index", "--add", "--cacheinfo", "160000,%s,sub" % self.head())
+        self.git("commit", "-q", "-m", "merge")
+        review_notes.write_mark(self.head(), self.repo, CLEAN)
+        self.assert_denied("git push origin main", "submodule commits")
 
     def test_merges_git_made_without_conflicts_need_no_review(self):
         self.git("switch", "-q", "-c", "side")

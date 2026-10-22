@@ -64,6 +64,9 @@ def git_parts(words, cwd, settings=()):
             git_dir = value if option == "--git-dir" else option[len("--git-dir="):]
         elif option == "-c":
             configs.append(value)
+        elif option == "--config-env" or option.startswith("--config-env="):  # KEY=ENVVAR: a value the gate cannot see
+            key, _, variable = (value if option == "--config-env" else option[len("--config-env="):]).rpartition("=")
+            configs.append("%s=$%s" % (key, variable))
         index += 2 if option in GIT_VALUE_OPTIONS else 1
     if index >= len(words):
         return None
@@ -160,8 +163,9 @@ def git_scripts(parts):
 
 def commands(command, cwd, depth=0):
     """(directory, words, settings, bodies, plain) for each simple command the line runs; settings are the VAR=value
-    words before it, bodies its here-document bodies, and plain is False when it runs inside a substitution, shell
-    script, eval or git alias, or behind a wrapper. ValueError if the line cannot be read."""
+    words before it (words is empty for a command that only assigns), bodies its here-document bodies, and plain is
+    False when it runs inside a substitution, shell script, eval or git alias, or behind a wrapper. ValueError if the
+    line cannot be read."""
     return _walk(shell_scan.parse(command), cwd, depth)
 
 
@@ -195,7 +199,7 @@ def _walk(nodes, cwd, depth):
         if node == ")":
             cwd, previous, pushed = scopes.pop() if scopes else (cwd, previous, pushed)
             continue
-        _, words, subs, bodies = node
+        kind, words, subs, bodies = node
         for sub in subs:
             found.extend(_walk(sub, cwd, _nested(depth)))
         settings, here, words, wrapped = [], cwd, [known(word, cwd) for word in words], False
@@ -216,17 +220,23 @@ def _walk(nodes, cwd, depth):
             else:
                 break
         if not words:
+            if settings:
+                found.append((here, [], settings, bodies, depth == 0 and not wrapped))
             continue
         name = os.path.basename(words[0])
-        if name == "cd" and words[1:] in ([], ["-"]):
-            cwd, previous = previous if words[1:] else os.path.expanduser("~"), cwd
-        elif name in ("cd", "pushd"):
-            targets = [word for word in words[1:] if not word.startswith("-")]
-            if len(targets) == 1:
+        if name in ("cd", "pushd", "popd"):
+            targets = [word for word in words[1:] if word not in ("-P", "-L", "-q", "--")]
+            if kind == "pipe":  # a subshell in bash, but the current shell at the end of a zsh pipeline
+                cwd = os.path.join(cwd, "$(%s in a pipeline)" % name)
+            elif name == "cd" and targets in ([], ["-"]):
+                cwd, previous = previous if targets else os.path.expanduser("~"), cwd
+            elif name == "popd" and not targets:
+                cwd, previous = pushed.pop() if pushed else cwd, cwd
+            elif name != "popd" and len(targets) == 1 and not targets[0].startswith(("-", "+")):
                 pushed.append(cwd) if name == "pushd" else None
                 cwd, previous = os.path.join(cwd, os.path.expanduser(targets[0])), cwd
-        elif name == "popd":
-            cwd, previous = pushed.pop() if pushed else cwd, cwd
+            else:  # a stack swap, +N/-N, pushd -n or zsh's `cd OLD NEW`: a directory the gate does not follow
+                cwd = os.path.join(cwd, "$(%s)" % " ".join(words))
         elif name in SHELLS or name == "eval":
             for script in _shell_scripts(name, words, bodies):
                 found.extend(commands(script, here, _nested(depth)))
