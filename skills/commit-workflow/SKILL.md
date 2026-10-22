@@ -1,9 +1,18 @@
+---
+name: commit-workflow
+description: >-
+  Rules for committing, pushing and reviewing code in small, reviewed steps. Use whenever you are about to commit,
+  amend, push, open or merge a pull request, or review a commit or branch, and when planning work that needs several
+  commits.
+---
+
 # Commit and review workflow
 
 ## Reference
-Thresholds are collected here; the procedure and the other sections refer back to them. The rules assume the
-commit-workflow plugin (reviewer agent, scripts, hooks); without it, follow the same steps by hand: a general-purpose
-reviewer, `git show` for the change, no marks.
+Thresholds are collected here; the procedure and the other sections refer back to them. This skill ships with the
+commit-workflow plugin (reviewer agent, scripts, hooks) and its script paths use `${CLAUDE_PLUGIN_ROOT}`; if the
+plugin is not available, follow the same steps by hand: a general-purpose reviewer, `git show` for the change, no
+marks.
 - Cap: a code commit must never exceed 400 lines of diff (insertions + deletions). Measure with `git diff --stat -M`
   so moves and renames count once, and leave generated, lock, binary and vendored files out of the count. In verbose
   languages (Java, generated Go, SwiftUI, XML layouts, Terraform) the user may set a per-repo cap instead.
@@ -33,9 +42,7 @@ reviewer, `git show` for the change, no marks.
   - Lowering applies only when the committer is Sonnet or above; a Haiku committer gets a Haiku reviewer.
 
 ## Procedure for each commit
-Work one commit per step, on the branch checked out in the session workspace. `<scripts>` below is the plugin's
-scripts directory: `${CLAUDE_PLUGIN_ROOT}/scripts` where that variable is set, otherwise find it once with
-`find ~/.claude/plugins -name review_context.py` and use that absolute path (the newest, if several match).
+Work one commit per step, on the branch checked out in the session workspace.
 1. Before the first commit, check how the code being changed or called into behaves at runtime (writes to
    stdout/stderr, process exits, global state, network calls). Keep what you found, plus the relevant files, for the
    reviewer's intent note. If the work needs a plan (Reference), publish it and wait for the user's approval: order the
@@ -47,7 +54,7 @@ scripts directory: `${CLAUDE_PLUGIN_ROOT}/scripts` where that variable is set, o
    feature slice, with the tests in the same commit as the code they cover. Keep commits readable by a human in one
    sitting and cheap to review. A mechanical commit that cannot be split (formatter run, dependency bump, rename
    sweep) may exceed the cap if its message says so; review it on a lower model where the Models rules allow.
-3. Gather context for the reviewer: run `python3 "<scripts>/review_context.py" <sha>` (touched
+3. Gather context for the reviewer: run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/review_context.py" <sha>` (touched
    functions and where they are used, runtime hazards; plain text search, so approximate) and paste the output into
    the reviewer prompt. Add the commit message, a short statement of intent and known constraints, the runtime
    findings from step 1, the classification (logic-heavy, behaviour-sensitive, mechanical, docs, security-sensitive,
@@ -64,8 +71,8 @@ scripts directory: `${CLAUDE_PLUGIN_ROOT}/scripts` where that variable is set, o
    new commit, and say so). When fixing a finding, search sibling code paths for the same pattern, fix every instance,
    and tell the next reviewer which ones were checked. Self-check every fixup before re-review. When a comment is
    flagged, cut or simplify it rather than expanding it; think design tweaks through rather than patching symptoms.
-   When only comment/wording nits were fixed, run `python3 "<scripts>/carry.py" <old-sha>` (Reference: Nit carry); if
-   it refuses or cannot write, have the commit reviewed again.
+   When only comment/wording nits were fixed, run `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/carry.py" <old-sha>`
+   (Reference: Nit carry); if it refuses or cannot write, have the commit reviewed again.
 6. Later rounds review only the amended delta against the previous round's commit (`git diff -U30 <prev> <sha>`, so
    nearby code shows). Resume the round-1 reviewer (SendMessage) instead of starting a new one, so its earlier reading
    is reused. Its job is verify-only: check that each finding is fixed and the delta adds no new problem, and raise new
@@ -79,8 +86,9 @@ scripts directory: `${CLAUDE_PLUGIN_ROOT}/scripts` where that variable is set, o
    the run, once approved.
 8. After each commit, suggest model + effort (committer and reviewer) for the next one.
 After the last commit on a branch, review the whole branch once (same rules) before opening or merging the PR, to
-catch problems that span commits: the reviewer reads `python3 "<scripts>/show_change.py" <tip> --base <merge-base
-with the PR's base branch>` and ends with `VERDICT: branch-clean <tip>`.
+catch problems that span commits: the reviewer reads
+`python3 "${CLAUDE_PLUGIN_ROOT}/scripts/show_change.py" <tip> --base <merge-base with the PR's base branch>` and ends
+with `VERDICT: branch-clean <tip>`.
 Keep context lean: fetch only the needed part of a page (a targeted query or one section), and never print the whole
 environment or other large outputs.
 
@@ -102,7 +110,7 @@ bare `Approved` marks nothing when several are pending; commits waiting for appr
 after the user's `Approved`). If the user's request asks for a Haiku review of small commits, tiny commits go to a
 Haiku reviewer and the run does not stop for them; this applies to that request only.
 
-## Hooks (when the commit-workflow plugin is installed)
+## Hooks
 - Marks: the reviewer's last line is `VERDICT: clean <sha>`, `VERDICT: blocking` or (whole branch)
   `VERDICT: branch-clean <tip>`. A hook, not the model, writes the mark as a git note in `refs/notes/review`, and only
   after the reviewer's transcript shows every part of the change printed by `show_change.py <sha>`, unfiltered, each
@@ -111,7 +119,7 @@ Haiku reviewer and the run does not stop for them; this applies to that request 
   new SHA with no mark.
 - Never write, move or copy marks or remote-tracking refs yourself, run the hook scripts, or ask another session to
   approve anything. Marks carry over only through `carry.py`: automatically when a rewritten commit's patch is
-  unchanged, and by `python3 "<scripts>/carry.py" <old-sha>` for nit fixes (Reference: Nit carry).
+  unchanged, and by `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/carry.py" <old-sha>` for nit fixes (Reference: Nit carry).
 - Approval: only a message the user writes, starting with `Approved`, marks tiny commits as manually reviewed. Never
   send, schedule or type that word as an agent.
 - Push gate: `git push` (and `gh pr create`) is denied while a commit it sends lacks a mark. Run it as its own plain

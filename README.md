@@ -2,7 +2,7 @@
 
 Rules for an AI coding agent (Claude Code) to commit and review code in small, reviewed steps, and a Claude Code
 plugin that enforces them: hooks stop `git push` and `gh pr create`/`merge` until the review has happened. The full
-rules are in [commit-workflow.md](commit-workflow.md).
+rules are in [skills/commit-workflow/SKILL.md](skills/commit-workflow/SKILL.md).
 
 ## Summary
 
@@ -30,11 +30,14 @@ review too). The scripts use only the standard library. `gh` is needed only if y
 /plugin install commit-workflow@commit-workflow
 ```
 
-The plugin brings the `commit-reviewer` agent, the scripts and the hooks. The rules themselves are not loaded
-automatically yet: copy [commit-workflow.md](commit-workflow.md) into `~/.claude/CLAUDE.md` (all projects) or a
-project's `CLAUDE.md`. They assume the plugin is installed: the procedure runs its scripts, and refers to their
-directory as `<scripts>` (`${CLAUDE_PLUGIN_ROOT}/scripts` where that variable is set, otherwise found under
-`~/.claude/plugins`).
+The plugin brings the `commit-reviewer` agent, the scripts, the hooks and the `commit-workflow` skill, which holds
+the rules. Claude loads the skill when it is about to commit, push, open a pull request or review. To make that
+certain, add a pointer to your `~/.claude/CLAUDE.md` (all projects) or a project's `CLAUDE.md`:
+
+```
+Whenever you commit, amend, push, open or merge a pull request, or review code, first load the `commit-workflow`
+skill and follow it. Review is mandatory for every commit.
+```
 
 ## How it works
 
@@ -108,8 +111,8 @@ directory. In `.claude/settings.json` (check the
 - Falsely denied: a commit message that quotes a notes setting after `;` or `(` (use `git commit -F file`).
 - `gh pr` checks: `gh api` merges, `gh` aliases, `gh pr edit --base` and the web UI are not covered; commits added to
   the remote branch since the last fetch are not seen.
-- `git remote set-url` and edits to `SKILL.md` or the rules are not watched; the sandbox rules above and review of
-  those files are the protection.
+- `git remote set-url` and edits to the skill, the agent or the hooks are not watched; the sandbox rules above and
+  review of those files are the protection.
 - Binary content cannot be shown to a reviewer: such a commit needs your `Approved`, and a branch containing it gets
   no branch mark, so open its pull request yourself.
 
