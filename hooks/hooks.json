@@ -7,6 +7,14 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|Monitor|CronCreate|ScheduleWakeup|RemoteTrigger|Skill|SendMessage|mcp__.*)$",
+        "hooks": [
+          { "type": "command", "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/gate.py\"" }
+        ]
+      }
+    ],
     "SubagentStop": [
       {
         "matcher": "^commit-workflow:commit-reviewer$",
