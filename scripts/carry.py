@@ -52,10 +52,12 @@ def change_ids(shas, cwd):
             if patch and b"\nGIT binary patch\n" not in patch}
 
 
-def carry_unchanged(cwd):
-    """Carry marks to commits whose change was reviewed under another SHA. Returns ([(new, old)], error or None)."""
+def carry_unchanged(cwd, candidates=None):
+    """Carry marks to commits (candidates, or the unpushed ones on HEAD) whose change was reviewed under another SHA.
+    Returns ([(new, old)], error or None)."""
     marks = review_notes.clean_marks(cwd)
-    todo = [sha for sha in review_notes.unpushed(cwd) if sha not in marks][:SCAN]
+    todo = [sha for sha in (review_notes.unpushed(cwd) if candidates is None else candidates)
+            if sha not in marks][:SCAN]
     carried = []
     if not marks or not todo:
         return carried, None

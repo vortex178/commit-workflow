@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""PreToolUse hook: keep the agent away from review marks.
+"""PreToolUse hook: keep unreviewed commits off the remote and keep the agent away from review marks.
 
 On Bash, and on any tool whose input has a shell `command`, it denies a command that
+- runs `git push` (or `gh pr create` or `gh repo create --push`, which may push) while a commit the push would send
+  lacks a clean mark. Commits on the target remote or on a network remote count as pushed, and merges git made
+  without conflicts need no mark. It first carries marks whose change is unchanged (carry.py), so a rebase under
+  reviewed commits needs no new review. It reads only a plain push (after `cd`, `-C` or VAR= settings at most); one
+  inside `$(...)`, `bash -c`, eval or an alias, or behind a wrapper, is denied, and so is a push after a command
+  that may change commits in the same line, since the gate sees the repository as it was before the line ran;
 - writes refs/notes/review, moves a remote-tracking ref, runs the hook scripts or imports their mark-writing code,
   which leaves carry.py as the only mark writer the agent can run;
 - starts another Claude session with a prompt mentioning approval.
@@ -9,8 +15,8 @@ On the tools that send prompts later or elsewhere (scheduled prompts, loops, mes
 prompt that starts with "Approved", since only the user may approve a commit.
 
 It reads commands as shell_words.py does, but not scripts written to disk or edits of .git files; it stops
-shortcuts, not an adversary (see the README for sandbox rules). If it cannot read a command that may touch the
-marks, it denies it.
+shortcuts, not an adversary (see the README for sandbox rules). If it cannot read a command that may push or touch
+the marks, it denies it.
 """
 import json
 import os
@@ -18,6 +24,7 @@ import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import carry  # noqa: E402
 import on_prompt  # noqa: E402
 import review_notes  # noqa: E402
 import shell_words  # noqa: E402
@@ -30,6 +37,13 @@ NOTES_READS = {"", "show", "list", "get-ref"}
 READ_COMMANDS = {"log", "show", "rev-parse", "for-each-ref", "show-ref", "cat-file", "ls-tree", "rev-list", "grep",
                  "diff", "ls-remote", "reflog", "describe", "merge-base", "name-rev", "shortlog", "format-patch",
                  "status", "checkout"}
+HARMLESS = {"cd", "pushd", "popd", "echo", "printf", "true", ":", "pwd", "ls", "cat", "head", "tail", "grep", "wc",
+            "sleep", "date", "which", "test", "["}  # may run before a push in the same line
+READ_FORMS = {"branch": (), "tag": ("-l", "--list"), "remote": ("-v", "get-url", "show"), "stash": ("list", "show"),
+              "worktree": ("list",), "config": ("--get", "--get-all", "--get-regexp", "--list", "-l")}  # or no operand
+STILL_COMMANDS = {  # git subcommands that move no commit, branch or HEAD
+    "status", "log", "show", "diff", "rev-parse", "ls-remote", "fetch", "describe", "shortlog", "rev-list", "cat-file",
+    "ls-files", "ls-tree", "grep", "blame", "show-ref", "for-each-ref", "merge-base", "name-rev", "version", "push"}
 HOOK_SCRIPTS = {"on_prompt.py", "on_reviewer_stop.py"}
 LAUNCHERS = {"npx", "bunx", "pnpx", "pnpm", "yarn"}
 IMPORT_RE = re.compile(r"\b(?:review_notes|on_prompt|on_reviewer_stop|write_mark)\b")
@@ -45,6 +59,7 @@ PYTHON_RE = re.compile(r"^python[0-9.]*$")
 RISKY_RE = re.compile(r"\b(?:push|notes|update-ref|symbolic-ref|fetch|pull|fast-import|claude)\b|review_notes|"
                       r"write_mark|on_prompt|on_reviewer_stop")
 APPROVAL_RE = re.compile(r"\bapproved?\b", re.I)
+SHORT_DRY_RE = re.compile(r"^-[46fquv]*[nd][46dfnquv]*$")  # -n or -d among push's short options
 LEAD_RE = re.compile(r"^\s*(?:/[\w:-]+\s+)?(?:(?:every\s+)?\d+\s*[smhd]\w*\s+)?", re.I)  # "/loop 5m ..."
 PROMPT_KEYS = {"prompt", "message", "messages", "text", "content", "body", "args", "input"}
 
@@ -176,6 +191,193 @@ def lock_problem(command, found):
     return None
 
 
+def config(directory, configs, key, every=False):
+    """A git config value (every value, as a list, with every) with the command's -c settings applied."""
+    options = [item for setting in configs if not setting.lower().startswith(("include.", "includeif."))
+               for item in ("-c", setting)]  # an included file could be a FIFO that never closes
+    result = review_notes.git([*options, "config", "--get-all" if every else "--get", key], directory)
+    return result.stdout.splitlines() if every else result.stdout.strip()
+
+
+def sources(specs):
+    """The revisions push refspecs send: `tag X` as refs/tags/X, wildcards as --glob, `:` (matching branches) as
+    --branches, none for deletes; ^X excludes X from the wildcards."""
+    result, excludes, index = [], [], 0
+    while index < len(specs):
+        if specs[index] == "tag" and index + 1 < len(specs):
+            result.append("refs/tags/" + specs[index + 1])
+            index += 2
+            continue
+        spec = specs[index].lstrip("+")
+        source = spec.split(":")[0]
+        if spec == ":":
+            result.append("--branches")
+        elif source.startswith("^"):
+            excludes.append("--exclude=" + source[1:])
+        elif source:
+            result.append("--glob=" + source if "*" in source else source)
+        index += 1
+    return [part for item in result for part in (excludes + [item] if item.startswith("--") else [item])]
+
+
+MIRROR = ["--exclude=refs/notes/*", "--exclude=refs/stash", "--all"]  # the marks are not commits to review
+
+
+def push_target(args, directory, configs):
+    """(remote, revisions the push sends) from git push's arguments; revisions None if nothing is sent."""
+    positional, remote, revisions, index = [], None, [], 0
+    while index < len(args):
+        arg = args[index]
+        if arg in ("--delete", "--dry-run") or SHORT_DRY_RE.match(arg):
+            return None, None
+        if arg in ("--all", "--branches"):
+            revisions.append("--branches")
+        elif arg == "--mirror":
+            revisions += MIRROR
+        elif arg == "--tags":
+            revisions.append("--tags")
+        elif arg.startswith("--repo="):
+            remote = arg[len("--repo="):]
+        elif arg in PUSH_VALUE_OPTIONS:
+            remote = args[index + 1] if arg == "--repo" and index + 1 < len(args) else remote
+            index += 1
+        elif not arg.startswith("-"):
+            positional.append(arg)
+        index += 1
+    remote, specs = positional[0] if positional else remote, positional[1:]
+    revisions += sources(specs)
+    if remote is None:
+        branch = review_notes.git(["branch", "--show-current"], directory).stdout.strip()
+        for key in ("branch.%s.pushRemote" % branch, "remote.pushDefault", "branch.%s.remote" % branch):
+            remote = config(directory, configs, key) or None
+            if remote:
+                break
+    remote = remote or "origin"
+    if remote == ".":  # updates local branches only
+        return None, None
+    if not specs and not revisions:  # what a bare push sends depends on the remote's and push's settings
+        pushes = config(directory, configs, "remote.%s.push" % remote, every=True)
+        mirror = config(directory, configs, "remote.%s.mirror" % remote).lower() in ("true", "yes", "on", "1")
+        revisions = MIRROR if mirror else \
+            sources(pushes) if pushes else \
+            ["--branches"] if config(directory, configs, "push.default") == "matching" else ["HEAD"]
+    return remote, revisions or None
+
+
+def is_local(url):
+    """Whether a remote URL is a path on this machine, which the agent can fill without pushing."""
+    return url.startswith("file://") or "://" not in url and not re.match(r"^[^/]+:", url)
+
+
+def same_url(url, other, directory):
+    paths = [os.path.realpath(os.path.join(directory, item[len("file://"):] if item.startswith("file://") else item))
+             if is_local(item) else item.rstrip("/") for item in (url, other)]
+    return paths[0] == paths[1]
+
+
+def gh_push(words, directory):
+    """git_parts of the push a gh command makes: `gh pr create` pushes an unpushed branch unless given --head, and
+    `gh repo create --push` pushes its --source; None for other gh commands."""
+    args, index = [], 1
+    while index < len(words):  # without gh's -R/--repo
+        if words[index] in ("-R", "--repo"):
+            index += 1
+        elif not words[index].startswith(("-R", "--repo=")):
+            args.append(words[index])
+        index += 1
+    if args[:2] in (["pr", "create"], ["pr", "new"]) and \
+            not any(word.startswith(("-H", "--head")) for word in args):
+        return directory, "push", [], []
+    if args[:2] == ["repo", "create"] and any(word == "--push" or word == "--push=true" for word in args):
+        source = next((value for option, value in zip(args, args[1:] + ["."]) if option in ("-s", "--source")),
+                      next((word[len("--source="):] for word in args if word.startswith("--source=")), "."))
+        return os.path.join(directory, os.path.expanduser(source)), "push", [], []
+    return None
+
+
+def clean_merge(sha, directory):
+    """Whether sha is a merge git made without conflicts or edits: its tree is the one merge-tree builds."""
+    parents = review_notes.git(["rev-parse", sha + "^@"], directory).stdout.split()
+    if len(parents) != 2:
+        return False
+    merged = review_notes.git(["merge-tree", "--write-tree", *parents], directory)  # git 2.38+
+    tree = review_notes.git(["rev-parse", sha + "^{tree}"], directory).stdout.strip()
+    return merged.returncode == 0 and merged.stdout.split()[:1] == [tree]
+
+
+def pushes(words, directory, settings):
+    """git_parts of the push the words run (git push, send-pack or subtree push, or a gh command that pushes)."""
+    if os.path.basename(words[0]) == "gh":
+        return gh_push(words, directory)
+    parts = shell_words.git_parts(words, directory, settings)
+    return parts if parts and (parts[1] in ("push", "send-pack") or parts[1] == "subtree" and "push" in parts[2]) \
+        else None
+
+
+def still(directory, words, settings):
+    """Whether a command run before a push in the same line surely leaves commits, branches and HEAD alone."""
+    parts = shell_words.git_parts(words, directory, settings) or pushes(words, directory, settings)
+    if not parts:
+        return os.path.basename(words[0]) in HARMLESS
+    sub, args = parts[1], parts[2]
+    return sub in STILL_COMMANDS or sub in READ_FORMS and \
+        (not operands(args, ()) or any(arg in READ_FORMS[sub] for arg in args))
+
+
+def push_problem(found):
+    """Why a push in the command would send unreviewed commits, or None. Only a plain `git push` (or gh command)
+    is read; one inside a substitution, shell script, eval or alias, or behind a wrapper, is denied."""
+    for number, (directory, words, settings, _, plain) in enumerate(found):
+        parts = pushes(words, directory, settings)
+        if not parts and not any(pushes(words[index:], directory, []) for index in range(1, len(words))):
+            continue
+        if not parts or not plain or parts[1] != "push":
+            return "run `git push` (or `gh pr create`) as a plain command, not through `$(...)`, `bash -c`, eval, " \
+                "an alias or a wrapper such as env or sudo, so the review gate can check it"
+        directory, _, args, configs = parts
+        if "$" in directory or "`" in directory or not os.path.isdir(directory):
+            return "could not tell which repository `%s` runs in; cd to it or name it with -C" % " ".join(words)
+        if not review_notes.is_repo(directory):
+            return "could not read the repository `%s` runs in" % " ".join(words)
+        if any("$" in arg or "`" in arg for arg in args):
+            return "could not tell what `%s` sends; name the remote and branches literally" % " ".join(words)
+        if not all(still(*item[:3]) for item in found[:number]):
+            return "the gate checks a push against the repository as it is before the command runs; run the push " \
+                "as its own command, after the commands that change commits or branches"
+        remote, revisions = push_target(args, directory, configs)
+        if revisions is None:
+            continue
+        names = remotes(directory)
+        urls = {name: config(directory, configs, "remote.%s.url" % name, every=True) for name in names}
+        if remote not in names:  # a URL: the configured remote it names, if any
+            remote = next((name for name in names for url in urls[name] + config(
+                directory, configs, "remote.%s.pushurl" % name, every=True) if same_url(remote, url, directory)), None)
+        # Commits on the target or on a network remote got there by a push; a local path can be filled directly.
+        trusted = {name for name in names if urls[name] and not any(is_local(url) for url in urls[name])}
+        counted = sorted(trusted | ({remote} if remote else set()))
+        pushed = ["--remotes=%s/*" % name for name in counted]
+        listed = review_notes.git(["rev-list", *revisions, "--not", *pushed, "--"], directory)
+        if listed.returncode != 0:
+            return "could not tell what `%s` sends (%s); push named branches" % (" ".join(words),
+                                                                                 listed.stderr.strip())
+        marks = review_notes.clean_marks(directory)
+        missing = [sha for sha in listed.stdout.split() if sha not in marks]
+        if missing and carry.carry_unchanged(directory, missing)[0]:
+            marks = review_notes.clean_marks(directory)
+            missing = [sha for sha in missing if sha not in marks]
+        missing = [sha for sha in missing if not clean_merge(sha, directory)]
+        if missing:
+            prefixes = ["refs/remotes/%s/" % name for name in counted]
+            fetched = prefixes and review_notes.git(["for-each-ref", "--count=1", *prefixes], directory).stdout
+            hint = "" if fetched else \
+                " (no remote it trusts has fetched branches, so all history counts; fetch first, or push this yourself)"
+            return ("%d commit(s) lack a clean review mark%s: %s. Review each with the commit-reviewer agent (or, "
+                    "for a tiny commit, ask the user to reply 'Approved'; after nit fixes, run carry.py OLD) as the "
+                    "commit workflow says" % (len(missing), hint,
+                                                    ", ".join(sha[:12] for sha in missing[:20])))
+    return None
+
+
 def prompts(value, every):
     """The strings in a tool input; for MCP tools (every False) only those under prompt-like keys."""
     if isinstance(value, str):
@@ -214,7 +416,10 @@ def main():
     try:
         found = shell_words.commands(command, cwd)
         reason = lock_problem(command, found)
-        return deny("Blocked: %s." % reason) if reason else 0
+        if reason:
+            return deny("Blocked: %s." % reason)
+        reason = push_problem(found)
+        return deny("Push blocked: %s." % reason) if reason else 0
     except Exception as error:  # fail closed for the commands this hook guards, open for the rest
         if not RISKY_RE.search(command):
             return 0

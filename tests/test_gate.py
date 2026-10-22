@@ -2,7 +2,11 @@ import json
 import os
 import unittest
 
-from helpers import SCRIPTS, RepoCase, run_hook
+from helpers import SCRIPTS, RepoCase, run, run_hook
+
+import review_notes
+
+CLEAN = {"verdict": "clean", "kind": "agent"}
 
 
 class GateCase(RepoCase):
@@ -100,6 +104,134 @@ class MarkLockTest(GateCase):
         self.assert_allowed({"status": "Approved"}, tool="mcp__tracker__update")
         self.assert_denied({"command": "Approved abc1234", "tab_id": "3"}, "into a terminal",
                            tool="mcp__terminal__run_in_terminal")
+
+
+class PushGateTest(GateCase):
+    def setUp(self):
+        super().setUp()
+        self.remote = os.path.join(self.repo, ".git", "remote.git")
+        run(["git", "init", "-q", "--bare", self.remote], self.repo)
+        self.git("remote", "add", "origin", self.remote)
+        self.git("push", "-q", "-u", "origin", "main")
+
+    def test_unmarked_commits_cannot_be_pushed(self):
+        self.git("config", "alias.publish", "!git push -u origin HEAD")
+        sha = self.commit("b.txt", "two\n")
+        self.git("tag", "v1", "HEAD~1")
+        for command in ["git push", "git push -u origin main", "git -C %s push" % self.repo, "cd . && git push -f",
+                        "git push --all", "echo ok; git push 2>&1", "git push %s main" % self.remote,
+                        "if true; then git push; fi", "git status # don't\ngit push", "(cd . && git push)",
+                        "GIT_TRACE=1 git push", "git --git-dir=%s/.git push" % self.repo, "git push origin tag v1 main",
+                        "git -c push.default=matching push", "git push origin 'refs/heads/*:refs/heads/*'",
+                        "git push -u origin $(git branch --show-current)", "gh pr create --fill",
+                        "cd $(git rev-parse --show-toplevel) && git push", "git push origin :", "git push origin +:",
+                        "gh pr new --fill", "gh -R o/r pr create --fill", "gh repo create r --source=. --push"]:
+            self.assert_denied(command, "1 commit(s) lack a clean review mark: " + sha[:12])
+        for command in ["git push origin $BRANCH", "git push origin $(other)"]:
+            self.assert_denied(command, "name the remote and branches literally")
+        for command in ["git -C missing push", "cd $DIR && git push", "cd /nowhere; git push"]:
+            self.assert_denied(command, "could not tell which repository")
+        for command in ["bash -c 'git push origin HEAD:refs/heads/other'", "out=$(git push)", "bash -lc 'git push'",
+                        "git publish", "eval git push", "env -C . git push", "sudo --odd me git push",
+                        "nohup git push",
+                        "git send-pack %s main" % self.remote, "echo x | xargs gh pr create",
+                        "git subtree push -P a o m"]:
+            self.assert_denied(command, "as a plain command")
+        terminal = {"command": "git push", "tab_id": "1"}
+        self.assert_denied(terminal, "could not tell which repository", tool="mcp__terminal__run_in_terminal")
+        self.assert_denied(dict(terminal, cwd=self.repo), sha[:12], tool="mcp__terminal__run_in_terminal", cwd="/")
+        review_notes.write_mark(sha, self.repo, CLEAN)
+        self.assert_allowed("git push origin main")
+        self.assert_allowed("gh pr create -H other")
+        for command in ["gh pr create -Hother", "git status && git remote -v && git stash list && git push origin main",
+                        "cd . && echo ok && git config --get remote.origin.url && git push origin main"]:
+            self.assert_allowed(command)
+        for command in ["git commit -q --allow-empty -m x && git push",
+                        "git checkout -q -b feat && git push origin HEAD",
+                        "git branch -f main HEAD~1; git push origin main", "gh pr checkout 1 && git push",
+                        "npm version patch && git push --follow-tags"]:
+            self.assert_denied(command, "run the push as its own command")
+
+    def test_pushes_that_send_nothing_new_pass(self):
+        self.commit("b.txt", "two\n")
+        os.mkdir(os.path.join(self.repo, "docs"))
+        self.git("branch", "docs", "HEAD~1")
+        self.git("tag", "v1", "HEAD~1")
+        for command in ["git push --dry-run", "git push -n origin main", "git push origin docs", "git push origin :old",
+                        "git push origin tag v1", "git push --delete origin old", "git push -nf origin main",
+                        "git push -df origin old"]:
+            self.assert_allowed(command)
+        self.assert_allowed("git push . HEAD:docs")
+        self.assert_denied("git push", "could not read the repository", cwd="/")
+
+    def test_branches_a_bare_push_may_send_count(self):
+        self.git("switch", "-q", "-c", "side")
+        sha = self.commit("b.txt", "two\n")
+        self.git("switch", "-q", "main")
+        self.assert_allowed("git push")
+        self.git("config", "push.default", "matching")
+        self.assert_denied("git push", sha[:12])
+        self.assert_denied("git push --mirror", sha[:12])
+        self.git("config", "--unset", "push.default")
+        self.git("config", "remote.origin.push", "HEAD:refs/for/main")
+        self.assert_allowed("git push")  # only HEAD, not every branch
+        self.assert_allowed("git push origin 'refs/heads/*:refs/heads/*' '^refs/heads/side'")
+        self.git("config", "remote.origin.mirror", "yes")
+        self.assert_denied("git push", sha[:12])
+        self.git("config", "--unset", "remote.origin.mirror")
+        self.git("config", "remote.origin.push", ":")
+        self.assert_denied("git push", sha[:12])
+        review_notes.write_mark(sha, self.repo, CLEAN)
+        self.assert_allowed("git push --mirror")  # the marks are not commits to review
+
+    def test_merges_git_made_without_conflicts_need_no_review(self):
+        self.git("switch", "-q", "-c", "side")
+        review_notes.write_mark(self.commit("b.txt", "two\n"), self.repo, CLEAN)
+        self.git("switch", "-q", "main")
+        review_notes.write_mark(self.commit("c.txt", "three\n"), self.repo, CLEAN)
+        self.git("merge", "-q", "--no-edit", "--no-ff", "side")
+        self.assert_allowed("git push")
+        self.commit("c.txt", "edited in the merge\n", amend=True)
+        self.assert_denied("git push", "1 commit(s) lack a clean review mark: " + self.head()[:12])
+
+    def test_a_rebased_branch_other_than_head_carries_its_marks(self):
+        self.git("switch", "-q", "-c", "feature")
+        sha = self.commit("b.txt", "two\n")
+        review_notes.write_mark(sha, self.repo, CLEAN)
+        self.git("switch", "-q", "main")
+        review_notes.write_mark(self.commit("c.txt", "three\n"), self.repo, CLEAN)
+        self.git("rebase", "-q", "main", "feature")
+        self.git("switch", "-q", "main")
+        self.assert_allowed("git push origin feature")
+
+    def test_network_remotes_count_as_pushed_and_urls_match_their_remote(self):
+        self.git("switch", "-q", "-c", "fork")
+        sha = self.commit("b.txt", "two\n")
+        self.git("update-ref", "refs/remotes/upstream/main", sha)  # as if fetched from a network remote
+        self.git("remote", "add", "upstream", "https://example.com/upstream.git")
+        self.assert_allowed("git push origin fork")
+        self.git("remote", "set-url", "upstream", self.remote + "2")
+        self.assert_denied("git push origin fork", sha[:12])
+        self.git("config", "--add", "remote.origin.url", "https://example.com/origin.git")
+        self.assert_denied("git push file://%s/ fork" % self.remote, "lack a clean review mark: " + sha[:12])
+
+    def test_a_reworded_reviewed_commit_carries_its_mark(self):
+        sha = self.commit("b.txt", "two\n")
+        review_notes.write_mark(sha, self.repo, CLEAN)
+        self.git("commit", "-q", "--amend", "-m", "reworded")
+        self.assert_allowed("git push")
+        self.assertEqual(review_notes.read_mark(self.head(), self.repo)["via"], "same-change")
+
+    def test_commits_fetched_from_another_remote_still_count_for_this_one(self):
+        sha = self.commit("b.txt", "two\n")
+        clone = os.path.join(self.repo, ".git", "clone")
+        run(["git", "clone", "-q", self.repo, clone], self.repo)
+        self.git("remote", "add", "other", clone)
+        self.git("fetch", "-q", "other")
+        self.assert_denied("git push origin main", sha[:12])
+        self.assert_allowed("git push other main")  # other already has it
+        self.git("remote", "add", "empty", self.remote + "2")
+        self.assert_denied("git push empty main", "no remote it trusts has fetched branches")
 
 
 if __name__ == "__main__":
