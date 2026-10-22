@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Print a commit's change for review, in parts that each fit in one Bash tool result.
 
-    show_change.py SHA [--from PREV] [--context N] [--part N]
+    show_change.py SHA [--from PREV | --base BASE] [--context N] [--part N]
 
 The change is SHA's patch against its first parent or, with --from, the patch from PREV to SHA: what an amend
-changed, for a later review round. PREV must have the same first parent as SHA. The patch comes from diff-tree with
+changed, for a later review round. PREV must have the same first parent as SHA. With --base, it is the patch from
+BASE, an ancestor, to SHA: a whole branch, for the review before a pull request. The patch comes from diff-tree with
 renames on, every file shown as text, and textconv, external diff and colour off. Each part is framed by lines naming
 the commit; the review hook recomputes the parts and writes a mark only when every one appears unaltered in the
 reviewer's output.
@@ -34,11 +35,13 @@ def width(line):
     return len(line.encode("utf-16-le")) // 2
 
 
-def parts(sha, prev, context, cwd):
-    """The change's parts as printed, or an error message."""
+def parts(sha, prev, context, cwd, branch=False):
+    """The change's parts as printed, or an error message. With branch, prev is the base of a branch ending at sha."""
+    if branch and (prev == sha or not review_notes.is_ancestor(prev, sha, cwd)):
+        return "%s is not an earlier commit on %s's branch." % (prev[:12], sha[:12])
     try:
         first = review_notes.parents(sha, cwd)[:1]
-        if prev and review_notes.parents(prev, cwd)[:1] != first:
+        if prev and not branch and review_notes.parents(prev, cwd)[:1] != first:
             return "%s does not have the same parent as %s; review %s in full." % (prev[:12], sha[:12], sha[:12])
     except RuntimeError as error:
         return "git failed: %s" % error
@@ -60,7 +63,7 @@ def parts(sha, prev, context, cwd):
             size = 0
         bodies[-1].append(line)
         size += width(line) + 1
-    name = "%s..%s" % (prev, sha) if prev else sha
+    name = "%s%s%s" % (prev, "..." if branch else "..", sha) if prev else sha
     return ["\n".join(["== commit-review %s -U%d part %d/%d ==" % (name, context, number, len(bodies)), *body,
                        "== end of part %d/%d ==" % (number, len(bodies))])
             for number, body in enumerate(bodies, 1)]
@@ -69,19 +72,22 @@ def parts(sha, prev, context, cwd):
 def main(argv):
     parser = argparse.ArgumentParser(description="Print a commit's change for review.")
     parser.add_argument("sha")
-    parser.add_argument("--from", dest="prev")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--from", dest="prev")
+    group.add_argument("--base")
     parser.add_argument("--context", type=int, default=3)
     parser.add_argument("--part", type=int, default=1)
     args = parser.parse_args(argv)
     cwd = os.getcwd()
-    sha, prev = review_notes.resolve(args.sha, cwd), review_notes.resolve(args.prev, cwd) if args.prev else ""
+    given = args.prev or args.base
+    sha, prev = review_notes.resolve(args.sha, cwd), review_notes.resolve(given, cwd) if given else ""
     if sha is None or prev is None:
-        print("Unknown commit: %s" % (args.sha if sha is None else args.prev))
+        print("Unknown commit: %s" % (args.sha if sha is None else given))
         return 1
     if not 0 <= args.context <= MAX_CONTEXT:
         print("--context must be from 0 to %d." % MAX_CONTEXT)
         return 1
-    shown = parts(sha, prev, args.context, cwd)
+    shown = parts(sha, prev, args.context, cwd, branch=bool(args.base))
     if isinstance(shown, str):
         print("Cannot show the change: " + shown)
         return 1
@@ -92,7 +98,8 @@ def main(argv):
     print(shown[args.part - 1])
     if args.part < len(shown):
         print('Next, in its own command: python3 "%s" %s%s --context %d --part %d'
-              % (os.path.abspath(__file__), sha, " --from " + prev if prev else "", args.context, args.part + 1))
+              % (os.path.abspath(__file__), sha, (" --base " if args.base else " --from ") + prev if prev else "",
+                 args.context, args.part + 1))
     return 0
 
 

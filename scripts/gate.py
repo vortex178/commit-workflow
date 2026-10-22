@@ -8,6 +8,8 @@ On Bash, and on any tool whose input has a shell `command`, it denies a command 
   reviewed commits needs no new review. It reads only a plain push (after `cd`, `-C` or VAR= settings at most); one
   inside `$(...)`, `bash -c`, eval or an alias, or behind a wrapper, is denied, and so is a push after a command
   that may change commits in the same line, since the gate sees the repository as it was before the line ran;
+- opens or merges a pull request (`gh pr create`, `gh pr merge`, run plainly from the pull request's branch) while
+  the branch tip lacks a whole-branch review mark whose base is on the pull request's base branch;
 - writes refs/notes/review, moves a remote-tracking ref, runs the hook scripts or imports their mark-writing code,
   which leaves carry.py as the only mark writer the agent can run;
 - starts another Claude session with a prompt mentioning approval.
@@ -29,6 +31,12 @@ import on_prompt  # noqa: E402
 import review_notes  # noqa: E402
 import shell_words  # noqa: E402
 
+CREATE_VALUE_OPTIONS = {"-B", "--base", "-H", "--head", "-t", "--title", "-b", "--body", "-F", "--body-file", "-a",
+                        "--assignee", "-l", "--label", "-m", "--milestone", "-p", "--project", "-r", "--reviewer",
+                        "-T", "--template", "--recover"}
+MERGE_VALUE_OPTIONS = {"-t", "--subject", "-b", "--body", "-F", "--body-file", "-A", "--author-email",
+                       "--match-head-commit"}
+GH_ENV_RE = re.compile(r"\bGH_(?:REPO|HOST)=")
 PUSH_VALUE_OPTIONS = {"-o", "--push-option", "--repo", "--receive-pack", "--exec"}
 FETCH_VALUE_OPTIONS = {"--depth", "--deepen", "-j", "--jobs", "--shallow-since", "--shallow-exclude", "--upload-pack",
                        "-o", "--server-option", "--negotiation-tip", "--refmap", "--recurse-submodules-default",
@@ -60,7 +68,7 @@ NOTES_DEST_RE = re.compile(r":(?:refs/)?notes/(?:review|\*)$")
 NOTES_SOURCE_RE = re.compile(r"^\+?(?:refs/)?notes/(?:review|\*)(?:$|:)")
 OVERRIDE_RE = re.compile(r"^(?:url\..*\.(?:push)?insteadof|remote\..*\.(?:url|fetch))=", re.I)
 PYTHON_RE = re.compile(r"^python[0-9.]*$")
-RISKY_RE = re.compile(r"\b(?:push|notes|update-ref|symbolic-ref|fetch|pull|fast-import|claude)\b|review_notes|"
+RISKY_RE = re.compile(r"\b(?:push|notes|update-ref|symbolic-ref|fetch|pull|fast-import|claude|pr)\b|review_notes|"
                       r"write_mark|on_prompt|on_reviewer_stop")
 APPROVAL_RE = re.compile(r"\bapproved?\b", re.I)
 SHORT_DRY_RE = re.compile(r"^-[46fquv]*[nd][46dfnquv]*$")  # -n or -d among push's short options
@@ -284,16 +292,22 @@ def same_url(url, other, directory):
     return paths[0] == paths[1]
 
 
-def gh_push(words, directory):
-    """git_parts of the push a gh command makes: `gh pr create` pushes an unpushed branch unless given --head, and
-    `gh repo create --push` pushes its --source; None for other gh commands."""
+def gh_args(words):
+    """A gh command's arguments without -R/--repo, and whether it had one."""
     args, index = [], 1
-    while index < len(words):  # without gh's -R/--repo
+    while index < len(words):
         if words[index] in ("-R", "--repo"):
             index += 1
         elif not words[index].startswith(("-R", "--repo=")):
             args.append(words[index])
         index += 1
+    return args, len(args) < len(words) - 1
+
+
+def gh_push(words, directory):
+    """git_parts of the push a gh command makes: `gh pr create` pushes an unpushed branch unless given --head, and
+    `gh repo create --push` pushes its --source; None for other gh commands."""
+    args = gh_args(words)[0]
     if args[:2] in (["pr", "create"], ["pr", "new"]) and \
             not any(word.startswith(("-H", "--head")) for word in args):
         return directory, "push", [], []
@@ -389,6 +403,93 @@ def push_problem(found):
     return None
 
 
+def gh_pr(words):
+    """("create" or "merge", the arguments after it, whether -R/--repo is given) for a gh command that opens or
+    merges a pull request, else None."""
+    if not words or os.path.basename(words[0]) != "gh":
+        return None
+    args, repo = gh_args(words)
+    if args[:2] in (["pr", "create"], ["pr", "new"], ["pr", "merge"]):
+        return "merge" if args[1] == "merge" else "create", args[2:], repo
+    return None
+
+
+def gh_options(args, value_options):
+    """({"-B": values, "-H": values}, operands) as gh reads args, or None for a short cluster that may hide -B or -H."""
+    given, rest, index = {"-B": [], "-H": []}, [], 0
+    while index < len(args):
+        arg = args[index]
+        name, equals, value = arg.partition("=") if arg.startswith("--") else (arg[:2], "", arg[2:])
+        if not arg.startswith("-") or arg == "-":
+            rest.append(arg)
+        elif name in value_options:
+            if not equals and not value:
+                value, index = (args[index + 1] if index + 1 < len(args) else ""), index + 1
+            given.setdefault({"--base": "-B", "--head": "-H"}.get(name, name), []).append(value)
+        elif not arg.startswith("--") and set(arg[2:]) & {"B", "H"}:
+            return None
+        index += 1
+    return given, rest
+
+
+def pr_problem(command, found):
+    """Why a pull request the command opens or merges lacks a whole-branch review, or None. Only a plain gh command,
+    run from the pull request's branch, is read."""
+    for number, (directory, words, settings, _, plain) in enumerate(found):
+        action = gh_pr(words)
+        if not action and not any(gh_pr(words[index:]) for index in range(1, len(words))):
+            continue
+        if not action or not plain or action[2] or GH_ENV_RE.search(command) or \
+                os.environ.get("GH_REPO") or os.environ.get("GH_HOST"):
+            return "run `gh pr create` or `gh pr merge` as a plain command in the branch's checkout, without -R, " \
+                "GH_REPO or GH_HOST, and not through `$(...)`, `bash -c`, eval, an alias or a wrapper, so the " \
+                "review gate can check it"
+        kind, args, _ = action
+        if "$" in directory or "`" in directory or not os.path.isdir(directory) or \
+                not review_notes.is_repo(directory) or any("$" in arg or "`" in arg for arg in args):
+            return "could not tell which branch `%s` is for; cd to its checkout and give values literally" % \
+                " ".join(words)
+        if not all(still(*item[:3]) for item in found[:number]):
+            return "the gate checks a pull request against the repository as it is before the command runs; run " \
+                "it as its own command"
+        head = review_notes.resolve("HEAD", directory)
+        branch = review_notes.git(["symbolic-ref", "--quiet", "--short", "HEAD"], directory).stdout.strip()
+        if head is None:
+            return "the branch has no commits yet"
+        parsed = gh_options(args, MERGE_VALUE_OPTIONS if kind == "merge" else CREATE_VALUE_OPTIONS)
+        if parsed is None or len(parsed[0]["-B"]) > 1 or len(parsed[0]["-H"]) > 1:
+            return "give --base and --head at most once each, each as its own option"
+        given, rest = parsed
+        if kind == "merge" and rest:
+            return "run `gh pr merge` without a pull request argument, from the pull request's branch"
+        upstream = review_notes.resolve("@{upstream}", directory)
+        if (kind == "merge" or upstream) and upstream != head:
+            return "HEAD is not what its upstream branch holds; push it (and fetch, if it may have changed " \
+                "elsewhere), or check out the pull request's branch"
+        if kind == "create" and (given["-H"] or [branch])[0] != branch:
+            return "run `gh pr create` from the pull request's branch, without --head naming another branch or a fork"
+        names = remotes(directory)
+        chosen = [name for name in names if config(directory, [], "remote.%s.gh-resolved" % name) == "base"]
+        remote = chosen[0] if len(chosen) == 1 else names[0] if len(names) == 1 and not chosen else None
+        if remote is None:
+            return "could not tell which repository the pull request is for; run `gh repo set-default`"
+        base_name = (given["-B"] or [config(directory, [], "branch.%s.gh-merge-base" % branch)])[0]
+        target = "refs/remotes/%s/%s" % (remote, base_name) if base_name else review_notes.git(
+            ["symbolic-ref", "--quiet", "refs/remotes/%s/HEAD" % remote], directory).stdout.strip()
+        if not target or review_notes.resolve(target, directory) is None:
+            return "could not tell the pull request's base branch; fetch it, run `git remote set-head %s --auto`, " \
+                "or name it with --base" % remote
+        base = review_notes.branch_base(head, directory)
+        if base is None or not review_notes.is_ancestor(base, target, directory):
+            start = review_notes.git(["merge-base", target, head], directory).stdout.strip()
+            if not start:
+                return "the branch shares no history with %s" % target[len("refs/remotes/"):]
+            return "the branch tip %s lacks a whole-branch review from %s. Have the commit-reviewer agent review " \
+                "the branch with `show_change.py %s --base %s` and end with 'VERDICT: branch-clean %s'" % (
+                    head[:12], target[len("refs/remotes/"):], head[:12], start[:12], head[:12])
+    return None
+
+
 def prompts(value, every):
     """The strings in a tool input; for MCP tools (every False) only those under prompt-like keys."""
     if isinstance(value, str):
@@ -430,7 +531,10 @@ def main():
         if reason:
             return deny("Blocked: %s." % reason)
         reason = push_problem(found)
-        return deny("Push blocked: %s." % reason) if reason else 0
+        if reason:
+            return deny("Push blocked: %s." % reason)
+        reason = pr_problem(command, found)
+        return deny("Pull request blocked: %s." % reason) if reason else 0
     except Exception as error:  # fail closed for the commands this hook guards, open for the rest
         if not RISKY_RE.search(command):
             return 0

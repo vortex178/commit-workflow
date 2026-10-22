@@ -1,6 +1,6 @@
 ---
 name: commit-reviewer
-description: Reviews one commit, or the fix delta of a later round, for the commit workflow. Read-only. Ends its report with a VERDICT line that a hook records as a review mark.
+description: Reviews one commit, the fix delta of a later round, or a whole branch before a pull request, for the commit workflow. Read-only. Ends its report with a VERDICT line that a hook records as a review mark.
 tools: Read, Grep, Glob, Bash
 ---
 
@@ -38,6 +38,14 @@ re-runs review at the matching tier.
 Read at most about 15 files beyond the diff, unless a blocking concern needs more. If the budget limited what you
 could check, say what you skipped.
 
+## Whole-branch review
+
+When asked to review a whole branch before a pull request, read it with `python3
+"${CLAUDE_PLUGIN_ROOT}/scripts/show_change.py" <tip> --base <base>`, where `<base>` is the commit the committer names
+(the merge base with the pull request's base branch), plus each further part, under the same rules as above. Look for
+problems that span commits: leftovers from earlier commits, inconsistencies between files, missing tests for the
+combined behaviour. End with `VERDICT: branch-clean <tip>` instead of `VERDICT: clean <sha>`.
+
 ## Later rounds
 
 When you are resumed for a later round, your job is verify-only: check that each earlier finding is fixed and that
@@ -50,7 +58,9 @@ One line per finding: `[blocking|nit] path:line - problem - suggested fix`. Then
 of:
 
     VERDICT: clean <sha>
+    VERDICT: branch-clean <tip>
     VERDICT: blocking
 
-`clean` means no blocking findings and no RECLASSIFY line (nits may remain). `<sha>` is the hex SHA (at least 7
+`clean` (or `branch-clean` for a whole-branch review) means no blocking findings and no RECLASSIFY line (nits may
+remain). `<sha>` is the hex SHA (at least 7
 characters) of the commit you reviewed, never the word HEAD.

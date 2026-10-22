@@ -5,8 +5,9 @@ The mark is written only when the verdict names a commit on the current branch a
 change: every part that show_change.py prints for it must appear unaltered in the output of one of the reviewer's
 successful Bash commands. The hook recomputes the parts itself, so a filtered, truncated or stale read cannot stand in
 for them. A later round may instead read the change from <prev> (`show_change.py <sha> --from <prev>`), when <prev>
-has the same parent and was itself seen that way. Problems the reviewer can fix make it continue once with
-instructions.
+has the same parent and was itself seen that way. A `branch-clean` verdict marks a whole branch, read as
+`show_change.py <tip> --base <base>`, for the gate on pull requests. Problems the reviewer can fix make it
+continue once with instructions.
 """
 import json
 import os
@@ -20,8 +21,11 @@ import show_change  # noqa: E402
 REVIEWER = "commit-workflow:commit-reviewer"
 VERDICT_RE = re.compile(r"^[ \t>*`]*VERDICT:[ \t]*([a-z-]+)(?:[ \t]+([0-9a-f]{7,64}))?[ \t*`.]*$", re.M | re.I)
 HEADER_RE = re.compile(r"^== commit-review (?:([0-9a-f]{40,64})\.\.)?([0-9a-f]{40,64}) -U([0-9]{1,4}) part 1/", re.M)
+BRANCH_HEADER_RE = re.compile(r"^== commit-review ([0-9a-f]{40,64})\.\.\.([0-9a-f]{40,64}) -U([0-9]{1,4}) part 1/",
+                              re.M)
 MAX_ROUNDS = 5
 MAX_READS = 50
+MAX_BRANCH_READS = 5
 
 
 def parse_verdict(text):
@@ -85,6 +89,18 @@ def _saw(sha, outputs, cwd, rounds, memo):
     return False
 
 
+def branch_saw(sha, outputs, cwd):
+    """The base of a branch ending at sha whose every part is among outputs, or None."""
+    reads = [(base, int(context)) for output in outputs for base, name, context in BRANCH_HEADER_RE.findall(output)
+             if name == sha]
+    for base, context in list(dict.fromkeys(reversed(reads)))[:MAX_BRANCH_READS]:  # the newest read first
+        parts = show_change.parts(sha, base, context, cwd, branch=True)
+        if isinstance(parts, list) and all(any("\n" + "\n".join(show_change.normalize(part)) + "\n" in output
+                                               for output in outputs) for part in parts):
+            return base
+    return None
+
+
 def report(message):
     print(json.dumps({"systemMessage": message}))
     return 0
@@ -113,24 +129,44 @@ def main():
         return 0
 
     verdict = parse_verdict(event.get("last_assistant_message"))
-    if verdict is None or (verdict[0] == "clean" and not verdict[1]):
-        return problem(event, "End your report with a verdict line naming the commit: 'VERDICT: clean %s' or "
-                              "'VERDICT: blocking'." % head, "the reviewer gave no verdict line with a commit.")
+    if verdict is None or (verdict[0] in ("clean", "branch-clean") and not verdict[1]):
+        return problem(event, "End your report with a verdict line naming the commit: 'VERDICT: %s %s' or "
+                              "'VERDICT: blocking'." % (verdict[0] if verdict else "clean", head),
+                       "the reviewer gave no verdict line with a commit.")
     word, prefix = verdict
     if word == "blocking":
         return 0
-    if word != "clean":
-        return problem(event, "'%s' is not a verdict. End with 'VERDICT: clean %s' or 'VERDICT: blocking'."
-                       % (word, head), "the verdict word was '%s'." % word)
+    if word not in ("clean", "branch-clean"):
+        return problem(event, "'%s' is not a verdict. End with 'VERDICT: clean %s', 'VERDICT: branch-clean %s' "
+                              "(for a whole-branch review) or 'VERDICT: blocking'." % (word, head, head),
+                       "the verdict word was '%s'." % word)
 
     sha = review_notes.resolve(prefix, cwd)
     if sha is None or not review_notes.is_ancestor(sha, head, cwd):
         return problem(event, "The verdict names %s, which is not a commit on the current branch (HEAD is %s). "
                               "Name the commit you reviewed." % (prefix, head), "the verdict names %s." % prefix)
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "show_change.py")
+    if word == "branch-clean" and sha != head:
+        return problem(event, "A whole-branch review marks the branch tip; name HEAD's SHA, %s." % head,
+                       "the branch verdict names %s, not the tip." % prefix)
+    if word == "branch-clean":
+        base = branch_saw(sha, bash_outputs(event.get("agent_transcript_path") or ""), cwd)
+        if base is None:
+            return problem(event, "Before a branch-clean verdict, run `python3 \"%s\" %s --base <base>`, where "
+                                  "<base> is where the branch leaves the pull request's base branch (`git merge-base "
+                                  "<base branch> %s`), and each further part it names, each in its own command, "
+                                  "without filtering its output; then repeat the verdict. If it reports binary "
+                                  "content, say so instead: the user then opens the pull request." % (script, sha, sha),
+                           "the reviewer's transcript shows no complete read of the branch ending at %s." % sha[:12])
+        try:
+            review_notes.write_mark(sha, cwd, {"verdict": "clean", "kind": "agent", "base": base,
+                                               "reviewer": REVIEWER, "agent_id": event.get("agent_id")}, branch=True)
+        except RuntimeError as error:
+            return report("Branch review mark not written: %s" % error)
+        return report("Branch review mark written for %s (from %s)." % (sha[:12], base[:12]))
     if not saw(sha, bash_outputs(event.get("agent_transcript_path") or ""), cwd):
         if show_change.parts(sha, "", 3, cwd) == show_change.BINARY:
             return report("Review mark not written for %s: %s" % (sha[:12], show_change.BINARY))
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "show_change.py")
         return problem(event, "Before a clean verdict, run `python3 \"%s\" %s` and each further part it names, each "
                               "in its own command, without filtering its output (in a later round, the same script "
                               "with `%s --from <prev>`, once you have read <prev> that way), then repeat the verdict."

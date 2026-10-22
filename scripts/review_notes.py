@@ -1,7 +1,8 @@
 """Review marks: git notes in refs/notes/review recording that one exact commit passed review.
 
-A mark is a JSON object attached to a commit SHA and naming that SHA. Amending or rebasing creates a new SHA; if
-git copies the note across (notes.rewriteRef), the copy names the old SHA and is ignored. Git runs without the
+A mark is a JSON object attached to a commit SHA and naming that SHA. Under "branch" it may also hold a
+whole-branch mark: the branch from "base" to this commit, its tip, passed review. Amending or rebasing creates a new
+SHA; if git copies the note across (notes.rewriteRef), the copy names the old SHA and is ignored. Git runs without the
 caller's GIT_* variables and with replace objects off, and no mark is written in a shallow repo or one with grafts,
 since those change what a commit's parent is.
 """
@@ -90,20 +91,30 @@ def read_mark(sha, cwd):
     return parse_mark(result.stdout, sha) if result.returncode == 0 else None
 
 
-def write_mark(sha, cwd, mark):
-    """Attach mark to sha, replacing any earlier mark. Adds the SHA and a UTC timestamp."""
+def write_mark(sha, cwd, mark, branch=False):
+    """Attach mark to sha, replacing any earlier mark (with branch, its whole-branch mark; each keeps the other).
+    Adds the SHA and a UTC timestamp."""
     shallow = git(["rev-parse", "--is-shallow-repository"], cwd)
     grafts = git(["rev-parse", "--git-path", "info/grafts"], cwd)
     if shallow.returncode != 0 or grafts.returncode != 0:
         raise RuntimeError((shallow.stderr or grafts.stderr).strip() or "git rev-parse failed")
     if shallow.stdout.strip() == "true" or os.path.exists(os.path.join(cwd, grafts.stdout.strip())):
         raise RuntimeError("the repository is shallow or has grafts, so a commit's parent cannot be trusted")
-    mark = dict(mark, commit=sha, at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-    result = git(["notes", "--ref", NOTES_REF, "add", "-f", "-m", json.dumps(mark, sort_keys=True), sha], cwd)
+    mark = dict(mark, at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    old = read_mark(sha, cwd) or {}
+    note = dict(old, branch=mark) if branch else dict(mark, **({"branch": old["branch"]} if "branch" in old else {}))
+    note["commit"] = sha
+    result = git(["notes", "--ref", NOTES_REF, "add", "-f", "-m", json.dumps(note, sort_keys=True), sha], cwd)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "git notes add failed")
-    return mark
+    return note
 
 
 def is_clean(mark):
     return bool(mark) and mark.get("verdict") == "clean"
+
+
+def branch_base(sha, cwd):
+    """The base of sha's clean whole-branch mark, or None."""
+    branch = (read_mark(sha, cwd) or {}).get("branch")
+    return branch.get("base") if isinstance(branch, dict) and is_clean(branch) else None

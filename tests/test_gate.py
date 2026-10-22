@@ -147,8 +147,8 @@ class PushGateTest(GateCase):
         self.assert_denied(dict(terminal, cwd=self.repo), sha[:12], tool="mcp__terminal__run_in_terminal", cwd="/")
         review_notes.write_mark(sha, self.repo, CLEAN)
         self.assert_allowed("git push origin main")
-        self.assert_allowed("gh pr create -H other")
-        for command in ["gh pr create -Hother", "git status && git remote -v && git stash list && git push origin main",
+        self.assert_denied("gh pr create -H other", "Pull request blocked")  # not a push, but the PR gate's
+        for command in ["git status && git remote -v && git stash list && git push origin main",
                         "cd . && echo ok && git config --get remote.origin.url && git push origin main",
                         "[[ -z $(git status --porcelain) ]] && export GIT_TRACE=1 && set -e; git push origin main",
                         "git branch --merged main && git branch --contains=HEAD && git push origin main"]:
