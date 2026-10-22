@@ -38,9 +38,11 @@ READ_COMMANDS = {"log", "show", "rev-parse", "for-each-ref", "show-ref", "cat-fi
                  "diff", "ls-remote", "reflog", "describe", "merge-base", "name-rev", "shortlog", "format-patch",
                  "status", "checkout"}
 HARMLESS = {"cd", "pushd", "popd", "echo", "printf", "true", ":", "pwd", "ls", "cat", "head", "tail", "grep", "wc",
-            "sleep", "date", "which", "test", "["}  # may run before a push in the same line
-READ_FORMS = {"branch": (), "tag": ("-l", "--list"), "remote": ("-v", "get-url", "show"), "stash": ("list", "show"),
-              "worktree": ("list",), "config": ("--get", "--get-all", "--get-regexp", "--list", "-l")}  # or no operand
+            "sleep", "date", "which", "test", "[", "[[", "set", "read"}  # may run before a push in the same line
+READ_FORMS = {"branch": ("-v", "-vv", "--verbose", "--merged", "--no-merged", "--contains", "--no-contains",
+                         "--points-at"), "tag": ("-l", "--list"), "remote": ("-v", "get-url", "show"),
+              "stash": ("list", "show"), "worktree": ("list",),
+              "config": ("--get", "--get-all", "--get-regexp", "--list", "-l")}  # or no operand
 STILL_COMMANDS = {  # git subcommands that move no commit, branch or HEAD
     "status", "log", "show", "diff", "rev-parse", "ls-remote", "fetch", "describe", "shortlog", "rev-list", "cat-file",
     "ls-files", "ls-tree", "grep", "blame", "show-ref", "for-each-ref", "merge-base", "name-rev", "version", "push"}
@@ -48,6 +50,8 @@ HOOK_SCRIPTS = {"on_prompt.py", "on_reviewer_stop.py"}
 LAUNCHERS = {"npx", "bunx", "pnpx", "pnpm", "yarn"}
 IMPORT_RE = re.compile(r"\b(?:review_notes|on_prompt|on_reviewer_stop|write_mark)\b")
 NOTES_REF_RE = re.compile(r"(?:^|[:+])refs/notes/review(?:$|[:~^@])")
+ASSIGNMENT_RE = re.compile(r"(?:^|[;&|\n(])\s*(\w+=\S*)")
+LINE_NOTES_RE = re.compile(r"\b(?:GIT_NOTES_REWRITE_REF=\S*(?:review|\*)|GIT_CONFIG_\w+=\S*notes)", re.I)
 NOTES_SETTING_RE = re.compile(r"^(?:git_notes_ref|git_notes_rewrite_ref|core\.notesref|notes\.rewriteref)=.*"
                               r"(?:review|\*)", re.I)
 NOTES_REF_OPTION_RE = re.compile(r"^--r(?:e|ef)?(?:=(.*))?$")  # git accepts --ref abbreviated
@@ -127,19 +131,21 @@ def python_problem(command, directory, words, bodies):
     return None
 
 
-def git_problem(command, directory, words, settings):
+def git_problem(command, directory, words, settings, assigned):
     parts = shell_words.git_parts(words, directory, settings)
     if not parts:
         return None
     directory, sub, args, configs = parts
-    setting = "=".join(operands(args, set())[:2]) if sub == "config" else ""  # `git config KEY VALUE`
+    keys = operands(args, set()) if sub == "config" else []
+    setting = "=".join(keys[1:3] if keys[:1] == ["set"] else keys[:2])  # `git config [set] KEY VALUE`
     named = any(NOTES_REF_RE.search(arg) for arg in args) or \
-        any(NOTES_SETTING_RE.match(item) for item in settings + configs + [setting])
+        any(NOTES_SETTING_RE.match(item) for item in settings + configs + [setting]) or \
+        bool(LINE_NOTES_RE.search(assigned))  # also when exported earlier in the line
     reading = sub in READ_COMMANDS
     if sub == "notes":
         ref, action = notes_ref_and_action(args)
         named = named or ref in ("review", "notes/review", review_notes.NOTES_REF) or \
-            bool(re.search(r"\bGIT_NOTES_REF=\S*review", command))  # also when exported earlier in the line
+            bool(re.search(r"\bGIT_NOTES_REF=\S*review", assigned))  # also when exported earlier in the line
         reading = action in NOTES_READS
     if sub in ("fetch", "pull", "push"):  # only what they write counts; a fetched source only fills FETCH_HEAD
         specs = operands(args, FETCH_VALUE_OPTIONS | PUSH_VALUE_OPTIONS)
@@ -175,6 +181,9 @@ def git_problem(command, directory, words, settings):
 
 def lock_problem(command, found):
     """Why the command touches the marks or the hooks, or None."""
+    assigned = " ".join([word for _, words, settings, *_ in found for word in settings + (
+        words[1:] if words[0] in ("export", "declare", "typeset") or words[:2] == ["builtin", "export"] else [])] +
+        ASSIGNMENT_RE.findall(command))  # VAR=value words, also of a line that only assigns
     for directory, words, settings, bodies, _ in found:
         name = os.path.basename(words[0])
         if PYTHON_RE.search(name):
@@ -185,7 +194,7 @@ def lock_problem(command, found):
                 and APPROVAL_RE.search(command):
             reason = "only the user can approve commits, so another Claude session cannot be sent an approval"
         else:
-            reason = git_problem(command, directory, words, settings)
+            reason = git_problem(command, directory, words, settings, assigned)
         if reason:
             return reason
     return None
@@ -318,10 +327,12 @@ def still(directory, words, settings):
     """Whether a command run before a push in the same line surely leaves commits, branches and HEAD alone."""
     parts = shell_words.git_parts(words, directory, settings) or pushes(words, directory, settings)
     if not parts:
-        return os.path.basename(words[0]) in HARMLESS
+        name = os.path.basename(words[0])
+        return name in HARMLESS or name == "export" and \
+            all(re.match(r"^(?!GIT_)|GIT_TRACE", word) for word in words[1:])  # GIT_DIR and such move the push
     sub, args = parts[1], parts[2]
     return sub in STILL_COMMANDS or sub in READ_FORMS and \
-        (not operands(args, ()) or any(arg in READ_FORMS[sub] for arg in args))
+        (not operands(args, ()) or any(arg.split("=")[0] in READ_FORMS[sub] for arg in args))
 
 
 def push_problem(found):

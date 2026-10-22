@@ -37,7 +37,11 @@ class MarkLockTest(GateCase):
                         "git push origin 'refs/notes/*'", "git fetch origin '+refs/*:refs/*'",
                         "git push origin '+refs/*:refs/*'", "git -c notes.rewriteRef=refs/notes/review commit --amend",
                         "GIT_NOTES_REWRITE_REF=refs/notes/review git commit --amend",
-                        "git config notes.rewriteRef 'refs/notes/*'"]:
+                        "git config notes.rewriteRef 'refs/notes/*'", "git config set notes.rewriteRef 'refs/notes/*'",
+                        "export GIT_NOTES_REWRITE_REF=refs/notes/review; git commit --amend",
+                        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=notes.rewriteRef GIT_CONFIG_VALUE_0=x git rebase main",
+                        "set -a; GIT_NOTES_REWRITE_REF=refs/notes/review; git commit --amend",
+                        "builtin export GIT_NOTES_REF=refs/notes/review; git notes add -m x"]:
             self.assert_denied(command, "review marks are written only")
         self.git("remote", "add", "origin", self.repo)
         for command in ["git update-ref refs/remotes/origin/main HEAD", "git fetch . HEAD:refs/remotes/origin/main",
@@ -85,7 +89,8 @@ class MarkLockTest(GateCase):
                         "git fetch origin main:refs/notes/reviewer",
                         "git fetch --filter blob:none origin main:refs/remotes/origin/main",
                         "git commit -m \"$(cat <<'EOF'\nDon't push refs/notes/review yet\nEOF\n)\"",
-                        "python3 --version; grep -n def %s/review_notes.py" % SCRIPTS]:
+                        "python3 --version; grep -n def %s/review_notes.py" % SCRIPTS,
+                        "git commit -m 'Deny GIT_NOTES_REWRITE_REF=refs/notes/review and GIT_CONFIG_KEY_0=notes.x'"]:
             self.assert_allowed(command)
 
     def test_a_command_the_gate_cannot_read_is_denied_only_if_it_may_be_risky(self):
@@ -144,12 +149,14 @@ class PushGateTest(GateCase):
         self.assert_allowed("git push origin main")
         self.assert_allowed("gh pr create -H other")
         for command in ["gh pr create -Hother", "git status && git remote -v && git stash list && git push origin main",
-                        "cd . && echo ok && git config --get remote.origin.url && git push origin main"]:
+                        "cd . && echo ok && git config --get remote.origin.url && git push origin main",
+                        "[[ -z $(git status --porcelain) ]] && export GIT_TRACE=1 && set -e; git push origin main",
+                        "git branch --merged main && git branch --contains=HEAD && git push origin main"]:
             self.assert_allowed(command)
         for command in ["git commit -q --allow-empty -m x && git push",
                         "git checkout -q -b feat && git push origin HEAD",
                         "git branch -f main HEAD~1; git push origin main", "gh pr checkout 1 && git push",
-                        "npm version patch && git push --follow-tags"]:
+                        "npm version patch && git push --follow-tags", "export GIT_DIR=.git; git push origin main"]:
             self.assert_denied(command, "run the push as its own command")
 
     def test_pushes_that_send_nothing_new_pass(self):
